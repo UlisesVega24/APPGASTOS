@@ -1,0 +1,1705 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>App Gastos (PWA)</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#34d399">
+  <link rel="icon" href="icon-192.png" sizes="192x192">
+  <link rel="icon" href="icon-512.png" sizes="512x512">
+  <style>
+    :root {
+      --bg: #0f172a; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#34d399;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+    }
+    *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:linear-gradient(180deg,var(--bg),#0b1220);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial,"Noto Sans",sans-serif;line-height:1.6;padding:2rem}
+    .container{max-width:1000px;margin:0 auto} .panel{background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:1rem 1.25rem;box-shadow:0 10px 25px rgba(0,0,0,.35);overflow:auto}
+    h1{color:var(--accent);margin:.2rem 0 1rem} pre{white-space:pre-wrap;word-wrap:break-word;font-family:var(--mono);font-size:.95rem;margin:0}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>App Gastos</h1>
+    <div class="panel">
+      <pre>import React, { useState, useEffect, useMemo, useCallback } from &#x27;react&#x27;;
+// Importaciones de Firebase V9
+import { initializeApp } from &#x27;firebase/app&#x27;;
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from &#x27;firebase/auth&#x27;;
+import { 
+  getFirestore, doc, collection, onSnapshot, query, where, addDoc, updateDoc, deleteDoc, setDoc, serverTimestamp
+} from &#x27;firebase/firestore&#x27;;
+import { LayoutDashboard, Clock3, CreditCard, PiggyBank, Trash2, ArrowLeft, Plus, CircleDollarSign, TrendingUp, TrendingDown, Fuel, Sparkles, AlertCircle, BookmarkPlus, DollarSign } from &#x27;lucide-react&#x27;;
+
+// --- CONFIGURACIÓN E INICIALIZACIÓN DE FIREBASE (MANDATORY) ---
+
+// 1. Obtener variables globales del entorno (manejo seguro de undefined)
+const appId = typeof __app_id !== &#x27;undefined&#x27; ? __app_id : &#x27;default-app-id&#x27;;
+const firebaseConfig = typeof __firebase_config !== &#x27;undefined&#x27; ? JSON.parse(__firebase_config) : null;
+const initialAuthToken = typeof __initial_auth_token !== &#x27;undefined&#x27; ? __initial_auth_token : null;
+
+// 2. Inicializar servicios de Firebase
+let app;
+let db;
+let auth;
+let firebaseInitialized = false;
+
+if (firebaseConfig) {
+  try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+    firebaseInitialized = true;
+  } catch (e) {
+    console.error(&quot;Error al inicializar Firebase:&quot;, e);
+  }
+} else {
+    console.warn(&quot;La configuración de Firebase no está disponible. La aplicación funcionará sin persistencia.&quot;);
+}
+
+// Helper para formatear moneda a MXN
+const currencyFormatter = new Intl.NumberFormat(&#x27;es-MX&#x27;, {
+  style: &#x27;currency&#x27;,
+  currency: &#x27;MXN&#x27;,
+  minimumFractionDigits: 2,
+});
+
+// Clases de utilidad de Tailwind
+const buttonClass = &quot;px-4 py-2 text-sm font-semibold rounded-full transition duration-300 ease-in-out&quot;;
+const inputClass = &quot;w-full p-2 border border-gray-300 rounded-lg focus:ring-emerald-500 focus:border-emerald-500&quot;;
+const cardBaseClass = &quot;p-4 rounded-xl shadow-lg&quot;;
+
+// --- GEMINI API HELPERS ---
+
+const GEMINI_MODEL = &#x27;gemini-2.5-flash-preview-09-2025&#x27;;
+const apiKey = &quot;&quot;; // Dejar vacío para que Canvas lo inyecte
+
+/**
+ * Función para llamar a la API de Gemini con manejo de reintentos.
+ */
+async function callGeminiApi(systemPrompt, userQuery) {
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+    const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: {
+            parts: [{ text: systemPrompt }]
+        },
+    };
+
+    const maxRetries = 3;
+    let attempt = 0;
+
+    while (attempt &lt; maxRetries) {
+        try {
+            const response = await fetch(apiUrl, {
+                method: &#x27;POST&#x27;,
+                headers: { &#x27;Content-Type&#x27;: &#x27;application/json&#x27; },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                // Si es un error de API, lanzar para reintentar (excepto 4xx)
+                if (response.status &lt; 500) {
+                     throw new Error(`API Error: ${response.status} - ${response.statusText}`);
+                } else {
+                    throw new Error(`Server Error: ${response.status}`);
+                }
+            }
+
+            const result = await response.json();
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text || &quot;No se pudo generar la respuesta.&quot;;
+            return text;
+
+        } catch (error) {
+            console.error(`Attempt ${attempt + 1} failed:`, error);
+            attempt++;
+            if (attempt &lt; maxRetries) {
+                // Espera exponencial (1s, 2s, 4s)
+                const delay = Math.pow(2, attempt) * 1000;
+                await new Promise(resolve =&gt; setTimeout(resolve, delay));
+            } else {
+                return &quot;Error al conectar con el asistente de IA. Inténtalo de nuevo más tarde.&quot;;
+            }
+        }
+    }
+    return &quot;Error desconocido al procesar la solicitud.&quot;;
+}
+
+// --- MAIN APPLICATION COMPONENT ---
+
+const App = () =&gt; {
+  const [userId, setUserId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState(&#x27;dashboard&#x27;); // &#x27;dashboard&#x27;, &#x27;fixed&#x27;, &#x27;cards&#x27;, &#x27;fuel&#x27;
+  
+  // Data States
+  const [transactions, setTransactions] = useState([]);
+  const [fixedExpenses, setFixedExpenses] = useState([]);
+  const [cards, setCards] = useState([]);
+  const [fuelRecords, setFuelRecords] = useState([]); 
+  const [settings, setSettings] = useState({ savingsGoal: 10 }); 
+
+  // LLM States
+  const [financialAdvice, setFinancialAdvice] = useState(&#x27;&#x27;);
+  const [isAdviceLoading, setIsAdviceLoading] = useState(false);
+  const [fuelAnalysis, setFuelAnalysis] = useState(&#x27;&#x27;);
+  const [isFuelAnalysisLoading, setIsFuelAnalysisLoading] = useState(false);
+
+  // Auth and Firestore Setup (sin cambios)
+  useEffect(() =&gt; {
+    if (!firebaseInitialized) {
+      setLoading(false);
+      return;
+    }
+
+    // 1. Proceso de Autenticación
+    const signInAndListen = async () =&gt; {
+      try {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error(&quot;Authentication Error:&quot;, error);
+      }
+    };
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) =&gt; {
+      if (user) {
+        setUserId(user.uid);
+      } else {
+        setUserId(null);
+      }
+      
+      if (!user) {
+        signInAndListen();
+      }
+    });
+
+    return () =&gt; unsubscribeAuth();
+  }, []); 
+
+  // 2. Listeners de Datos de Firestore (sin cambios)
+  useEffect(() =&gt; {
+    if (!userId || !db) return;
+
+    const basePath = `/artifacts/${appId}/users/${userId}`;
+    let unsubscribers = [];
+
+    // Listener para Transacciones
+    const transactionsRef = collection(db, `${basePath}/transactions`);
+    const unsubTransactions = onSnapshot(transactionsRef, (snapshot) =&gt; {
+      const data = snapshot.docs.map(doc =&gt; ({ 
+        id: doc.id, 
+        ...doc.data(), 
+        amount: Number(doc.data().amount),
+        // Asegurar que pendingBalance y paidAmount sean números, si existen
+        pendingBalance: Number(doc.data().pendingBalance || 0), 
+        paidAmount: Number(doc.data().paidAmount || 0),
+      }));
+      setTransactions(data.sort((a, b) =&gt; {
+          const dateA = a.timestamp ? a.timestamp.toMillis() : new Date(a.date).getTime();
+          const dateB = b.timestamp ? b.timestamp.toMillis() : new Date(b.date).getTime();
+          return dateB - dateA;
+      }));
+    }, (error) =&gt; console.error(&quot;Error fetching transactions:&quot;, error));
+    unsubscribers.push(unsubTransactions);
+
+    // Listener para Gastos Fijos
+    const fixedRef = collection(db, `${basePath}/fixedExpenses`);
+    const unsubFixed = onSnapshot(fixedRef, (snapshot) =&gt; {
+      const data = snapshot.docs.map(doc =&gt; ({ 
+        id: doc.id, 
+        ...doc.data(), 
+        monthlyAmount: Number(doc.data().monthlyAmount) 
+      }));
+      setFixedExpenses(data);
+    }, (error) =&gt; console.error(&quot;Error fetching fixed expenses:&quot;, error));
+    unsubscribers.push(unsubFixed);
+
+    // Listener para Tarjetas
+    const cardsRef = collection(db, `${basePath}/cards`);
+    const unsubCards = onSnapshot(cardsRef, (snapshot) =&gt; {
+      const data = snapshot.docs.map(doc =&gt; ({ 
+        id: doc.id, 
+        ...doc.data(), 
+        accumulatedDebt: Number(doc.data().accumulatedDebt) 
+      }));
+      setCards(data);
+    }, (error) =&gt; console.error(&quot;Error fetching cards:&quot;, error));
+    unsubscribers.push(unsubCards);
+
+    // Listener para Registros de Combustible 
+    const fuelRef = collection(db, `${basePath}/fuelRecords`);
+    const unsubFuel = onSnapshot(fuelRef, (snapshot) =&gt; {
+        const data = snapshot.docs.map(doc =&gt; ({
+            id: doc.id,
+            ...doc.data(),
+            gasto: Number(doc.data().gasto),
+            litros: Number(doc.data().litros),
+            kmRecorridos: Number(doc.data().kmRecorridos),
+        }));
+        setFuelRecords(data.sort((a, b) =&gt; new Date(b.fecha).getTime() - new Date(a.fecha).getTime()));
+    }, (error) =&gt; console.error(&quot;Error fetching fuel records:&quot;, error));
+    unsubscribers.push(unsubFuel);
+    
+    // Listener para Configuración
+    const settingsDocRef = doc(db, `${basePath}/settings/userSettings`);
+    const unsubSettings = onSnapshot(settingsDocRef, (docSnap) =&gt; {
+      if (docSnap.exists()) {
+        setSettings(docSnap.data());
+      } else {
+        setDoc(settingsDocRef, settings);
+      }
+      setLoading(false);
+    }, (error) =&gt; {
+      console.error(&quot;Error fetching settings:&quot;, error);
+      setLoading(false);
+    });
+    unsubscribers.push(unsubSettings);
+    
+    return () =&gt; {
+      unsubscribers.forEach(unsub =&gt; unsub());
+    };
+  }, [userId]);
+
+  // --- CORE UTILITY FUNCTIONS ---
+
+  const formatMXN = (amount) =&gt; currencyFormatter.format(amount);
+
+  const calculateTotals = (txns) =&gt; {
+    let income = 0;
+    let expenses = 0;
+
+    txns.forEach(t =&gt; {
+      // Si es MSI, el gasto en flujo de caja es solo la mensualidad. Si no, es el total.
+      const monthlyPayment = t.msiMonths &gt; 1 ? t.amount / t.msiMonths : t.amount;
+      
+      if (t.type === &#x27;income&#x27;) {
+        income += t.amount;
+      } else if (t.type === &#x27;expense&#x27;) {
+        // En el flujo de caja, solo se cuenta el monto mensual. 
+        // Si es tarjeta con saldo pendiente, idealmente es el monto mensual, 
+        // pero por simplicidad de flujo de caja, se usa el cálculo original de la transacción
+        expenses += monthlyPayment; 
+      }
+    });
+
+    const balance = income - expenses;
+    return { income, expenses, balance };
+  };
+
+  const { income, expenses, balance } = useMemo(() =&gt; calculateTotals(transactions), [transactions]);
+
+  // Cálculo de totales fijos para el análisis de LLM
+  const calculateFixedProjections = useMemo(() =&gt; {
+    const totalFixedMonthly = fixedExpenses.reduce((sum, item) =&gt; sum + item.monthlyAmount, 0);
+
+    const fixedData = fixedExpenses.map(item =&gt; {
+        const percentage = totalFixedMonthly &gt; 0 ? (item.monthlyAmount / totalFixedMonthly) * 100 : 0;
+        const weeklyProjected = item.monthlyAmount / 4;
+
+        return {
+            ...item,
+            percentage: percentage.toFixed(2),
+            weeklyProjected: weeklyProjected,
+        };
+    });
+    
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const variableExpensesLast30Days = transactions.filter(t =&gt; 
+      t.type === &#x27;expense&#x27; &amp;&amp; 
+      (t.timestamp ? t.timestamp.toDate() : new Date(t.date)) &gt;= thirtyDaysAgo
+    ).reduce((sum, t) =&gt; sum + (t.msiMonths &gt; 1 ? t.amount / t.msiMonths : t.amount), 0);
+    
+    const monthlyFlowProjection = totalFixedMonthly + variableExpensesLast30Days;
+
+    return {
+      fixedData,
+      totalFixedMonthly,
+      totalWeeklyProjected: totalFixedMonthly / 4,
+      monthlyFlowProjection,
+      variableExpensesLast30Days,
+    };
+  }, [fixedExpenses, transactions]);
+
+  // Cálculo de totales de combustible para el análisis de LLM
+  const calculateFuelMetrics = useMemo(() =&gt; {
+      const totalLitros = fuelRecords.reduce((sum, r) =&gt; sum + Number(r.litros), 0);
+      const totalGasto = fuelRecords.reduce((sum, r) =&gt; sum + Number(r.gasto), 0);
+      const totalKm = fuelRecords.reduce((sum, r) =&gt; sum + Number(r.kmRecorridos), 0);
+      
+      const promedioRendimiento = totalLitros &gt; 0 ? (totalKm / totalLitros) : 0;
+      
+      return { totalLitros, totalGasto, totalKm, promedioRendimiento };
+  }, [fuelRecords]);
+  
+  // --- GEMINI API ACTIONS (NUEVAS FUNCIONES) ---
+
+  const generateFinancialAdvice = useCallback(async () =&gt; {
+    if (isAdviceLoading) return;
+    
+    setIsAdviceLoading(true);
+    setFinancialAdvice(&#x27;&#x27;);
+
+    // Prepara la lista de gastos fijos
+    const fixedList = fixedExpenses.map(f =&gt; `${f.concept}: ${formatMXN(f.monthlyAmount)}`).join(&#x27;; &#x27;);
+    const fixedTotal = calculateFixedProjections.totalFixedMonthly;
+
+    const systemPrompt = &quot;Eres un asesor financiero experto y amigable. Tu objetivo es revisar las finanzas de un usuario y ofrecer un consejo único y conciso (máximo 100 palabras) que combine sus datos de ingresos, gastos y metas de ahorro. Sé motivador y accionable. Formatea tu respuesta estrictamente en Markdown.&quot;;
+    const userQuery = `Mis datos financieros son:
+    - Balance actual: ${formatMXN(balance)}
+    - Ingresos totales: ${formatMXN(income)}
+    - Gastos totales (Flujo de Caja): ${formatMXN(expenses)}
+    - Total de Gastos Fijos Mensuales: ${formatMXN(fixedTotal)}
+    - Mi meta de ahorro es el ${settings.savingsGoal}%.
+    - Gastos Fijos Detallados: ${fixedList}.
+    
+    Analiza esto y dame un consejo financiero personalizado.`;
+    
+    const advice = await callGeminiApi(systemPrompt, userQuery);
+    setFinancialAdvice(advice);
+    setIsAdviceLoading(false);
+  }, [balance, income, expenses, fixedExpenses, settings, isAdviceLoading]);
+
+  const generateFuelAnalysis = useCallback(async () =&gt; {
+    if (isFuelAnalysisLoading) return;
+    
+    setIsFuelAnalysisLoading(true);
+    setFuelAnalysis(&#x27;&#x27;);
+
+    const recordsForAnalysis = fuelRecords.slice(0, 5).map(r =&gt; 
+        `Fecha: ${r.fecha}, Gasto: ${formatMXN(r.gasto)}, Litros: ${Number(r.litros).toFixed(2)}, Km: ${Number(r.kmRecorridos).toFixed(1)}`
+    ).join(&#x27;; &#x27;);
+
+    const systemPrompt = &quot;Eres un ingeniero automotriz y analista de eficiencia de combustible. Revisa los datos de carga de combustible y proporciona un análisis conciso (máximo 100 palabras) sobre el rendimiento promedio y cualquier recomendación de manejo o mantenimiento. Sé técnico pero accesible. Formatea tu respuesta estrictamente en Markdown.&quot;;
+    const userQuery = `Mis últimos ${fuelRecords.length} registros de combustible son:
+    - Registros: ${recordsForAnalysis}
+    - Rendimiento Promedio Global: ${calculateFuelMetrics.promedioRendimiento.toFixed(2)} Km/L
+    - Total Km registrados: ${calculateFuelMetrics.totalKm.toFixed(1)} Km.
+
+    Analiza estos datos y dame una recomendación de eficiencia o un resumen del rendimiento.`;
+
+    const analysis = await callGeminiApi(systemPrompt, userQuery);
+    setFuelAnalysis(analysis);
+    setIsFuelAnalysisLoading(false);
+  }, [fuelRecords, calculateFuelMetrics, isFuelAnalysisLoading]);
+
+
+  // --- FIRESTORE ACTIONS (MODIFICADAS) ---
+  
+  // Función para añadir a Gastos Fijos
+  const addFixedExpense = useCallback(async (concept, amount) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const fixedRef = collection(db, `/artifacts/${appId}/users/${userId}/fixedExpenses`);
+      await addDoc(fixedRef, {
+        concept: concept.toUpperCase(),
+        monthlyAmount: Number(amount),
+      });
+      console.log(`Gasto fijo &#x27;${concept}&#x27; añadido con éxito.`);
+    } catch (e) {
+      console.error(&quot;Error adding fixed expense: &quot;, e);
+    }
+  }, [userId, db]);
+
+  // Función de Transacción (ACTUALIZADA con pendingBalance/paidAmount)
+  const addTransaction = useCallback(async (data) =&gt; {
+    if (!userId || !db) {
+        console.error(&quot;Firestore no está disponible.&quot;);
+        return;
+    }
+    
+    try {
+      const transactionRef = collection(db, `/artifacts/${appId}/users/${userId}/transactions`);
+      const transactionAmount = Number(data.amount);
+      const isCardExpense = data.cardId &amp;&amp; data.type === &#x27;expense&#x27;;
+
+      const newTransaction = {
+        ...data,
+        description: data.description.toUpperCase(),
+        amount: transactionAmount,
+        date: new Date().toISOString(),
+        timestamp: serverTimestamp(),
+        // Nuevos campos para la lógica de tarjetas
+        cardId: data.cardId || null, 
+        msiMonths: data.cardId ? Number(data.msiMonths) : 1, // 1 si no usa tarjeta o no es MSI
+        
+        // INICIALIZACIÓN DE BALANCE PENDIENTE Y PAGADO (NUEVO)
+        pendingBalance: isCardExpense ? transactionAmount : 0, 
+        paidAmount: 0, 
+      };
+      await addDoc(transactionRef, newTransaction);
+      console.log(&quot;Transaction added successfully.&quot;);
+
+      // LÓGICA DE ACTUALIZACIÓN DE DEUDA DE TARJETA (Acumulado de deuda ORIGINAL)
+      if (isCardExpense) {
+        const cardRef = doc(db, `/artifacts/${appId}/users/${userId}/cards`, data.cardId);
+        const currentCard = cards.find(c =&gt; c.id === data.cardId);
+
+        if (currentCard) {
+            // accumulatedDebt sigue siendo el total original de la compra
+            const newDebt = currentCard.accumulatedDebt + transactionAmount;
+            await updateDoc(cardRef, { accumulatedDebt: newDebt });
+            console.log(`Deuda (Original Acumulada) actualizada en tarjeta ${currentCard.name}.`);
+        }
+      }
+
+      // LÓGICA DE GASTO FIJO AUTOMÁTICO
+      if (data.isFixedExpense &amp;&amp; data.type === &#x27;expense&#x27;) {
+          const monthlyAmount = data.msiMonths &gt; 1 ? transactionAmount / data.msiMonths : transactionAmount;
+          await addFixedExpense(data.description, monthlyAmount);
+      }
+
+    } catch (e) {
+      console.error(&quot;Error adding transaction: &quot;, e);
+    }
+  }, [userId, db, cards, addFixedExpense]); 
+
+  // Función para borrar transacción (MODIFICADA: Reversión de deuda de Tarjeta)
+  const deleteTransaction = useCallback(async (id, cardId, originalAmount) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const transactionRef = doc(db, `/artifacts/${appId}/users/${userId}/transactions`, id);
+      await deleteDoc(transactionRef);
+      console.log(&quot;Transaction deleted successfully.&quot;);
+
+      // LÓGICA DE REVERSIÓN DE DEUDA DE TARJETA (Acumulado de deuda ORIGINAL)
+      if (cardId) {
+          const cardRef = doc(db, `/artifacts/${appId}/users/${userId}/cards`, cardId);
+          const currentCard = cards.find(c =&gt; c.id === cardId);
+
+          if (currentCard) {
+              // Se resta el monto original completo de la transacción del acumulado ORIGINAL
+              const newDebt = currentCard.accumulatedDebt - originalAmount;
+              await updateDoc(cardRef, { accumulatedDebt: Math.max(0, newDebt) });
+              console.log(`Deuda (Original Acumulada) revertida en tarjeta ${currentCard.name}.`);
+          }
+      }
+
+    } catch (e) {
+      console.error(&quot;Error deleting document: &quot;, e);
+    }
+  }, [userId, db, cards]); 
+  
+  // NUEVA FUNCIÓN: Registrar Pago/Abono a una Transacción (MSI o a Crédito)
+  const registerPayment = useCallback(async (transactionId, amountPaid) =&gt; {
+    if (!userId || !db) return;
+    
+    // Obtener la transacción actual del estado local (asumiendo que está sincronizado)
+    const currentTxn = transactions.find(t =&gt; t.id === transactionId);
+
+    if (!currentTxn) {
+        console.error(&quot;Transacción no encontrada para registrar el pago.&quot;);
+        return;
+    }
+    
+    try {
+      const transactionRef = doc(db, `/artifacts/${appId}/users/${userId}/transactions`, transactionId);
+      
+      const amount = Number(amountPaid);
+      
+      // La cantidad a pagar no puede ser mayor al saldo pendiente
+      const amountToPay = Math.min(amount, currentTxn.pendingBalance);
+      
+      const newPendingBalance = Math.max(0, currentTxn.pendingBalance - amountToPay);
+      const newPaidAmount = currentTxn.paidAmount + amountToPay;
+
+      await updateDoc(transactionRef, {
+        pendingBalance: newPendingBalance,
+        paidAmount: newPaidAmount,
+      });
+
+      console.log(`Pago de ${formatMXN(amountToPay)} registrado en transacción ${transactionId}.`);
+      
+    } catch (e) {
+      console.error(&quot;Error al registrar el pago: &quot;, e);
+    }
+  }, [userId, db, transactions]);
+
+
+  // Funciones no modificadas (mantienen la lógica original)
+
+  const updateSettings = useCallback(async (newSettings) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const settingsDocRef = doc(db, `/artifacts/${appId}/users/${userId}/settings/userSettings`);
+      await setDoc(settingsDocRef, newSettings, { merge: true });
+      console.log(&quot;Settings updated.&quot;);
+    } catch (e) {
+      console.error(&quot;Error updating settings: &quot;, e);
+    }
+  }, [userId, db]);
+
+  const deleteFixedExpense = useCallback(async (id) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const fixedRef = doc(db, `/artifacts/${appId}/users/${userId}/fixedExpenses`, id);
+      await deleteDoc(fixedRef);
+    } catch (e) {
+      console.error(&quot;Error deleting fixed expense: &quot;, e);
+    }
+  }, [userId, db]);
+  
+  const addCard = useCallback(async (name, cutDay, paymentDay) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const cardsRef = collection(db, `/artifacts/${appId}/users/${userId}/cards`);
+      await addDoc(cardsRef, {
+        name: name.toUpperCase(),
+        cutDay: Number(cutDay),
+        paymentDay: Number(paymentDay),
+        accumulatedDebt: 0, 
+      });
+    } catch (e) {
+      console.error(&quot;Error adding card: &quot;, e);
+    }
+  }, [userId, db]);
+
+  const addFuelRecord = useCallback(async (data) =&gt; {
+    if (!userId || !db) {
+      console.error(&quot;Firestore no está disponible.&quot;);
+      return;
+    }
+    
+    try {
+      const fuelRef = collection(db, `/artifacts/${appId}/users/${userId}/fuelRecords`);
+      const newRecord = {
+        ...data,
+        gasto: Number(data.gasto),
+        litros: Number(data.litros),
+        kmRecorridos: Number(data.kmRecorridos),
+        timestamp: serverTimestamp(),
+      };
+      await addDoc(fuelRef, newRecord);
+      console.log(&quot;Fuel record added successfully.&quot;);
+
+    } catch (e) {
+      console.error(&quot;Error adding fuel record: &quot;, e);
+    }
+  }, [userId, db]); 
+
+  const deleteFuelRecord = useCallback(async (id) =&gt; {
+    if (!userId || !db) return;
+    try {
+      const fuelRef = doc(db, `/artifacts/${appId}/users/${userId}/fuelRecords`, id);
+      await deleteDoc(fuelRef);
+      console.log(&quot;Fuel record deleted successfully.&quot;);
+    } catch (e) {
+      console.error(&quot;Error deleting fuel record: &quot;, e);
+    }
+  }, [userId, db]);
+  
+  // --- CORE UI COMPONENTS ---
+
+  const Header = ({ title }) =&gt; (
+    &lt;div className=&quot;bg-white p-4 shadow-xl rounded-xl mb-6&quot;&gt;
+      &lt;h1 className=&quot;text-3xl font-extrabold text-gray-800&quot;&gt;{title}&lt;/h1&gt;
+      &lt;p className=&quot;text-sm text-gray-500 mt-1&quot;&gt;ID de Usuario: {userId || &#x27;Cargando...&#x27;}&lt;/p&gt;
+    &lt;/div&gt;
+  );
+
+  const Navigation = () =&gt; {
+    const navItems = [
+      { name: &#x27;Dashboard&#x27;, key: &#x27;dashboard&#x27;, Icon: LayoutDashboard },
+      { name: &#x27;Gastos Fijos&#x27;, key: &#x27;fixed&#x27;, Icon: Clock3 },
+      { name: &#x27;Tarjetas y Deuda&#x27;, key: &#x27;cards&#x27;, Icon: CreditCard },
+      { name: &#x27;Combustible&#x27;, key: &#x27;fuel&#x27;, Icon: Fuel }
+    ];
+
+    return (
+      &lt;div className=&quot;flex justify-center p-2 bg-white rounded-full shadow-2xl mx-auto mb-8 max-w-xl sticky top-4 z-10&quot;&gt;
+        {navItems.map((item) =&gt; {
+          const isActive = view === item.key;
+          const activeClass = &#x27;bg-emerald-600 text-white shadow-emerald-500/50 transform scale-105&#x27;;
+          const inactiveClass = &#x27;text-gray-600 hover:bg-gray-100&#x27;;
+
+          return (
+            &lt;button
+              key={item.key}
+              onClick={() =&gt; setView(item.key)}
+              className={`flex items-center space-x-2 ${buttonClass} ${isActive ? activeClass : inactiveClass}`}
+            &gt;
+              &lt;item.Icon className=&quot;w-5 h-5&quot; /&gt;
+              &lt;span className=&quot;hidden sm:inline&quot;&gt;{item.name}&lt;/span&gt;
+            &lt;/button&gt;
+          );
+        })}
+      &lt;/div&gt;
+    );
+  };
+
+
+  // --- 1. DASHBOARD VIEW (MODIFICADA CON LLM) ---
+  
+  const TotalsCard = ({ title, value, gradientClass, icon: Icon, isBalance = false }) =&gt; (
+      &lt;div 
+        className={`relative ${cardBaseClass} ${gradientClass} text-white overflow-hidden shadow-2xl transition duration-300 transform hover:scale-[1.02]`}
+      &gt;
+        &lt;div className=&quot;absolute top-0 right-0 p-3 opacity-20&quot;&gt;
+            &lt;Icon className=&quot;w-16 h-16&quot; /&gt;
+        &lt;/div&gt;
+        &lt;div className=&quot;z-10 relative&quot;&gt;
+            &lt;p className=&quot;text-sm font-medium opacity-80 flex items-center space-x-2&quot;&gt;
+                &lt;Icon className=&quot;w-5 h-5&quot; /&gt;
+                &lt;span&gt;{title}&lt;/span&gt;
+            &lt;/p&gt;
+            &lt;h3 className=&quot;text-4xl font-extrabold mt-2 tracking-tight&quot;&gt;
+                {formatMXN(value)}
+            &lt;/h3&gt;
+            {isBalance &amp;&amp; (
+                &lt;p className=&quot;text-xs mt-1 font-semibold&quot;&gt;
+                    Estado: {value &gt;= 0 ? &#x27;¡Saludable!&#x27; : &#x27;En Riesgo&#x27;}
+                &lt;/p&gt;
+            )}
+        &lt;/div&gt;
+      &lt;/div&gt;
+  );
+
+  // Formulario de Transacción (MODIFICADO: con opción de Gasto Fijo)
+  const TransactionForm = ({ onSubmit, onAddFixedExpense }) =&gt; {
+    const [type, setType] = useState(&#x27;expense&#x27;);
+    const [description, setDescription] = useState(&#x27;&#x27;);
+    const [amount, setAmount] = useState(&#x27;&#x27;);
+    const [cardId, setCardId] = useState(&#x27;&#x27;);
+    const [msiMonths, setMsiMonths] = useState(1);
+    const [isFixedExpense, setIsFixedExpense] = useState(false); // NUEVO ESTADO
+
+    const handleSubmit = (e) =&gt; {
+      e.preventDefault();
+      if (!description || !amount || Number(amount) &lt;= 0) return;
+
+      onSubmit({
+        type,
+        description,
+        amount,
+        cardId: cardId || null,
+        msiMonths: cardId ? Number(msiMonths) : 1,
+        isFixedExpense: isFixedExpense &amp;&amp; type === &#x27;expense&#x27;, // Solo para gastos
+      });
+
+      // Resetear
+      setDescription(&#x27;&#x27;);
+      setAmount(&#x27;&#x27;);
+      setCardId(&#x27;&#x27;);
+      setMsiMonths(1);
+      setIsFixedExpense(false);
+    };
+
+    return (
+      &lt;form onSubmit={handleSubmit} className={`${cardBaseClass} bg-white space-y-4`}&gt;
+        &lt;h2 className=&quot;text-xl font-bold text-gray-800&quot;&gt;Registrar Transacción&lt;/h2&gt;
+        &lt;div className=&quot;flex space-x-4&quot;&gt;
+          &lt;button
+            type=&quot;button&quot;
+            onClick={() =&gt; setType(&#x27;income&#x27;)}
+            className={`${buttonClass} w-1/2 ${type === &#x27;income&#x27; ? &#x27;bg-green-500 text-white shadow-md&#x27; : &#x27;bg-gray-200 text-gray-700 hover:bg-green-100&#x27;}`}
+          &gt;
+            &lt;CircleDollarSign className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Ingreso
+          &lt;/button&gt;
+          &lt;button
+            type=&quot;button&quot;
+            onClick={() =&gt; setType(&#x27;expense&#x27;)}
+            className={`${buttonClass} w-1/2 ${type === &#x27;expense&#x27; ? &#x27;bg-red-500 text-white shadow-md&#x27; : &#x27;bg-gray-200 text-gray-700 hover:bg-red-100&#x27;}`}
+          &gt;
+            &lt;CircleDollarSign className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Gasto
+          &lt;/button&gt;
+        &lt;/div&gt;
+        &lt;input
+          type=&quot;text&quot;
+          placeholder=&quot;Concepto (e.g., SUELDO / RENTA)&quot;
+          value={description}
+          onChange={(e) =&gt; setDescription(e.target.value)}
+          className={inputClass}
+          required
+        /&gt;
+        &lt;input
+          type=&quot;number&quot;
+          placeholder=&quot;Monto (MXN)&quot;
+          value={amount}
+          onChange={(e) =&gt; setAmount(e.target.value)}
+          className={inputClass}
+          min=&quot;0.01&quot;
+          step=&quot;0.01&quot;
+          required
+        /&gt;
+        {type === &#x27;expense&#x27; &amp;&amp; (
+          &lt;div className=&quot;flex flex-col space-y-2 md:space-y-0 md:flex-row md:space-x-2&quot;&gt;
+            &lt;select
+              value={cardId}
+              onChange={(e) =&gt; {
+                setCardId(e.target.value);
+                // Reset MSI if card is removed
+                if (!e.target.value) setMsiMonths(1);
+              }}
+              className={inputClass}
+            &gt;
+              &lt;option value=&quot;&quot;&gt;-- Pago en Efectivo/Débito --&lt;/option&gt;
+              {cards.map(card =&gt; (
+                &lt;option key={card.id} value={card.id}&gt;{card.name}&lt;/option&gt;
+              ))}
+            &lt;/select&gt;
+            {cardId &amp;&amp; (
+              &lt;input
+                type=&quot;number&quot;
+                placeholder=&quot;MSI (Plazos) - Default 1&quot;
+                value={msiMonths}
+                onChange={(e) =&gt; setMsiMonths(e.target.value)}
+                className={`${inputClass} md:w-1/4`}
+                min=&quot;1&quot;
+                step=&quot;1&quot;
+              /&gt;
+            )}
+          &lt;/div&gt;
+        )}
+
+        {/* NUEVA OPCIÓN: Añadir a Gastos Fijos */}
+        {type === &#x27;expense&#x27; &amp;&amp; (
+            &lt;div className=&quot;flex items-center space-x-3 p-3 bg-gray-50 rounded-lg&quot;&gt;
+                &lt;input
+                    id=&quot;isFixedExpense&quot;
+                    type=&quot;checkbox&quot;
+                    checked={isFixedExpense}
+                    onChange={(e) =&gt; setIsFixedExpense(e.target.checked)}
+                    className=&quot;h-4 w-4 text-emerald-600 border-gray-300 rounded focus:ring-emerald-500&quot;
+                /&gt;
+                &lt;label htmlFor=&quot;isFixedExpense&quot; className=&quot;text-sm font-medium text-gray-700 flex items-center&quot;&gt;
+                    &lt;BookmarkPlus className=&quot;w-4 h-4 mr-1 text-emerald-600&quot; /&gt;
+                    ¿Es un Gasto Fijo/Recurrente? (Se añade a la lista de fijos)
+                &lt;/label&gt;
+            &lt;/div&gt;
+        )}
+
+        &lt;button
+          type=&quot;submit&quot;
+          className={`${buttonClass} w-full ${type === &#x27;income&#x27; ? &#x27;bg-green-600&#x27; : &#x27;bg-red-600&#x27;} text-white shadow-md`}
+        &gt;
+          &lt;Plus className=&quot;w-5 h-5 inline mr-1&quot; /&gt; {type === &#x27;income&#x27; ? &#x27;Añadir Ingreso&#x27; : &#x27;Añadir Gasto&#x27;}
+        &lt;/button&gt;
+      &lt;/form&gt;
+    );
+  };
+  
+  const DashboardView = () =&gt; {
+    const balanceGradient = balance &gt;= 0 
+      ? &#x27;bg-gradient-to-r from-emerald-600 to-green-500&#x27; 
+      : &#x27;bg-gradient-to-r from-red-600 to-pink-500&#x27;;
+
+    return (
+      &lt;div className=&quot;space-y-6&quot;&gt;
+        &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-6&quot;&gt;
+          &lt;TotalsCard 
+            title=&quot;Balance Total&quot; 
+            value={balance} 
+            gradientClass={balanceGradient} 
+            icon={CircleDollarSign} 
+            isBalance={true}
+          /&gt;
+          &lt;TotalsCard 
+            title=&quot;Ingresos Acumulados&quot; 
+            value={income} 
+            gradientClass=&quot;bg-gradient-to-r from-blue-600 to-indigo-500&quot; 
+            icon={TrendingUp} 
+          /&gt;
+          &lt;TotalsCard 
+            title=&quot;Gastos Totales&quot; 
+            value={expenses} 
+            gradientClass=&quot;bg-gradient-to-r from-orange-600 to-red-500&quot; 
+            icon={TrendingDown} 
+          /&gt;
+        &lt;/div&gt;
+
+        {/* --- SECCIÓN DE ASESORÍA LLM --- */}
+        &lt;div className={`${cardBaseClass} bg-white space-y-3 p-6 shadow-xl border-t-4 border-emerald-500`}&gt;
+            &lt;h2 className=&quot;text-xl font-bold text-gray-800 flex items-center&quot;&gt;
+                &lt;Sparkles className=&quot;w-6 h-6 mr-2 text-emerald-500&quot; /&gt;
+                Asesoría Financiera Inteligente
+            &lt;/h2&gt;
+            &lt;button
+                onClick={generateFinancialAdvice}
+                disabled={isAdviceLoading}
+                className={`${buttonClass} w-full bg-emerald-600 text-white hover:bg-emerald-700 shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed`}
+            &gt;
+                {isAdviceLoading ? (
+                    &lt;div className=&quot;flex items-center justify-center&quot;&gt;
+                        &lt;div className=&quot;animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2&quot;&gt;&lt;/div&gt;
+                        Analizando datos...
+                    &lt;/div&gt;
+                ) : (
+                    &lt;&gt;
+                        &lt;Sparkles className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Generar Consejo Financiero
+                    &lt;/&gt;
+                )}
+            &lt;/button&gt;
+            {financialAdvice &amp;&amp; (
+                &lt;div className=&quot;mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-gray-700&quot;&gt;
+                    &lt;p className=&quot;font-semibold mb-1 text-emerald-600&quot;&gt;Recomendación de Gemini:&lt;/p&gt;
+                    &lt;div dangerouslySetInnerHTML={{ __html: financialAdvice.replace(/\n/g, &#x27;&lt;br /&gt;&#x27;) }} /&gt;
+                &lt;/div&gt;
+            )}
+        &lt;/div&gt;
+        {/* --- FIN SECCIÓN LLM --- */}
+
+        &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-6&quot;&gt;
+          &lt;div className=&quot;md:col-span-1&quot;&gt;
+            &lt;TransactionForm onSubmit={addTransaction} onAddFixedExpense={addFixedExpense} /&gt;
+          &lt;/div&gt;
+          &lt;div className=&quot;md:col-span-2&quot;&gt;
+            &lt;h2 className=&quot;text-xl font-bold text-gray-800 mb-3&quot;&gt;Historial de Transacciones (Flujo de Caja)&lt;/h2&gt;
+            &lt;div className={`${cardBaseClass} bg-white p-4 max-h-96 overflow-y-auto`}&gt;
+              {transactions.length === 0 ? (
+                &lt;p className=&quot;text-gray-500 text-center py-4&quot;&gt;Aún no hay transacciones registradas.&lt;/p&gt;
+              ) : (
+                &lt;ul className=&quot;divide-y divide-gray-100&quot;&gt;
+                  {transactions.map((t) =&gt; {
+                      const msiMonthsSafe = t.msiMonths &gt; 1 ? t.msiMonths : 1; 
+                      const monthlyPayment = t.msiMonths &gt; 1 ? t.amount / msiMonthsSafe : t.amount;
+                      
+                      const displayDate = t.timestamp 
+                          ? t.timestamp.toDate().toLocaleDateString(&#x27;es-MX&#x27;)
+                          : new Date(t.date).toLocaleDateString(&#x27;es-MX&#x27;);
+                      
+                      const cardName = cards.find(c =&gt; c.id === t.cardId)?.name;
+
+                      return (
+                          &lt;li key={t.id} className=&quot;flex justify-between items-center py-3&quot;&gt;
+                              &lt;div className=&quot;flex-1 min-w-0 pr-4&quot;&gt;
+                                  &lt;p className={`font-semibold ${t.type === &#x27;income&#x27; ? &#x27;text-green-700&#x27; : &#x27;text-red-700&#x27;}`}&gt;
+                                      {t.description}
+                                  &lt;/p&gt;
+                                  &lt;p className=&quot;text-xs text-gray-500&quot;&gt;
+                                      {displayDate}
+                                      {t.cardId &amp;&amp; (
+                                        &lt;span className=&quot;ml-2 font-bold text-purple-600&quot;&gt;
+                                            ({cardName})
+                                        &lt;/span&gt;
+                                      )}
+                                      {t.msiMonths &gt; 1 &amp;&amp; ` | ${t.msiMonths} MSI`}
+                                  &lt;/p&gt;
+                              &lt;/div&gt;
+                              &lt;div className=&quot;text-right&quot;&gt;
+                                  &lt;p className={`font-bold ${t.type === &#x27;income&#x27; ? &#x27;text-green-600&#x27; : &#x27;text-red-600&#x27;}`}&gt;
+                                      {formatMXN(monthlyPayment)}
+                                  &lt;/p&gt;
+                                  {/* Muestra el monto total de la compra original si es MSI o tarjeta de crédito */}
+                                  {(t.msiMonths &gt; 1 || t.cardId) &amp;&amp; &lt;p className=&quot;text-xs text-gray-400&quot;&gt;Total: {formatMXN(t.amount)}&lt;/p&gt;}
+                              &lt;/div&gt;
+                              &lt;button
+                                // Se pasa el monto original completo (t.amount) para la reversión de deuda de tarjeta
+                                onClick={() =&gt; deleteTransaction(t.id, t.cardId, t.amount)}
+                                className=&quot;ml-4 p-2 text-red-500 hover:text-red-700 rounded-full hover:bg-red-50&quot;
+                                title=&quot;Eliminar&quot;
+                              &gt;
+                                &lt;Trash2 className=&quot;h-4 w-4&quot; /&gt;
+                              &lt;/button&gt;
+                          &lt;/li&gt;
+                      )
+                  })}
+                &lt;/ul&gt;
+              )}
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    );
+  };
+
+  // --- 2. FIXED EXPENSES VIEW (sin cambios) ---
+  const FixedExpenseForm = () =&gt; {
+    const [concept, setConcept] = useState(&#x27;&#x27;);
+    const [amount, setAmount] = useState(&#x27;&#x27;);
+
+    const handleSubmit = (e) =&gt; {
+      e.preventDefault();
+      if (!concept || !amount || Number(amount) &lt;= 0) return;
+      
+      addFixedExpense(concept, amount);
+
+      setConcept(&#x27;&#x27;);
+      setAmount(&#x27;&#x27;);
+    };
+
+    return (
+      &lt;form onSubmit={handleSubmit} className={`${cardBaseClass} bg-white space-y-4 shadow-xl border-l-4 border-purple-500`}&gt;
+        &lt;h3 className=&quot;text-lg font-bold text-gray-800&quot;&gt;Añadir Gasto Fijo Manual&lt;/h3&gt;
+        &lt;input
+          type=&quot;text&quot;
+          placeholder=&quot;Concepto Fijo (e.g., RENTA, NETFLIX)&quot;
+          value={concept}
+          onChange={(e) =&gt; setConcept(e.target.value)}
+          className={inputClass}
+          required
+        /&gt;
+        &lt;input
+          type=&quot;number&quot;
+          placeholder=&quot;Monto Mensual (MXN)&quot;
+          value={amount}
+          onChange={(e) =&gt; setAmount(e.target.value)}
+          className={inputClass}
+          min=&quot;0.01&quot;
+          step=&quot;0.01&quot;
+          required
+        /&gt;
+        &lt;button
+          type=&quot;submit&quot;
+          className={`${buttonClass} w-full bg-purple-600 text-white hover:bg-purple-700 shadow-md`}
+        &gt;
+          &lt;Plus className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Añadir Gasto Fijo
+        &lt;/button&gt;
+      &lt;/form&gt;
+    );
+  };
+  
+  const SavingsGoal = () =&gt; {
+      const [goal, setGoal] = useState(settings.savingsGoal);
+
+      const handleSave = (e) =&gt; {
+          e.preventDefault();
+          const newGoal = Number(goal);
+          if (newGoal &gt;= 0 &amp;&amp; newGoal &lt;= 100) {
+              updateSettings({ savingsGoal: newGoal });
+          }
+      };
+
+      useEffect(() =&gt; {
+          setGoal(settings.savingsGoal);
+      }, [settings.savingsGoal]);
+
+      return (
+          &lt;form onSubmit={handleSave} className={`${cardBaseClass} bg-indigo-50 space-y-4 shadow-xl border-l-4 border-indigo-500`}&gt;
+              &lt;h3 className=&quot;text-lg font-bold text-indigo-900&quot;&gt;Meta de Ahorro Mensual&lt;/h3&gt;
+              &lt;div className=&quot;flex items-center space-x-2&quot;&gt;
+                  &lt;input
+                      type=&quot;number&quot;
+                      value={goal}
+                      onChange={(e) =&gt; setGoal(e.target.value)}
+                      className={`${inputClass} w-2/3`}
+                      min=&quot;0&quot;
+                      max=&quot;100&quot;
+                      step=&quot;1&quot;
+                      required
+                  /&gt;
+                  &lt;span className=&quot;text-2xl font-extrabold text-indigo-700 w-1/3&quot;&gt;%&lt;/span&gt;
+              &lt;/div&gt;
+              &lt;p className=&quot;text-xs text-indigo-700&quot;&gt;Meta de ahorro calculada sobre tus ingresos netos.&lt;/p&gt;
+              &lt;button
+                  type=&quot;submit&quot;
+                  className={`${buttonClass} w-full bg-indigo-600 text-white hover:bg-indigo-700 shadow-md`}
+              &gt;
+                  Guardar Meta
+              &lt;/button&gt;
+          &lt;/form&gt;
+      );
+  };
+  
+  const ApplyFixedButton = () =&gt; (
+      &lt;div className={`${cardBaseClass} bg-emerald-50 shadow-xl border-l-4 border-emerald-500 flex flex-col justify-between`}&gt;
+          &lt;h3 className=&quot;text-lg font-bold text-emerald-900&quot;&gt;Proyección de Ahorro&lt;/h3&gt;
+          &lt;p className=&quot;text-sm text-emerald-700&quot;&gt;Calcula lo que necesitas ahorrar para alcanzar tu meta de {settings.savingsGoal}%.&lt;/p&gt;
+          &lt;div className=&quot;mt-4&quot;&gt;
+              &lt;button
+                  disabled
+                  className={`${buttonClass} w-full bg-emerald-600 text-white shadow-md disabled:bg-gray-400`}
+              &gt;
+                  Calcular Ahorro (Próximamente)
+              &lt;/button&gt;
+          &lt;/div&gt;
+      &lt;/div&gt;
+  );
+
+  const FixedExpensesView = () =&gt; {
+    const { fixedData, totalFixedMonthly, totalWeeklyProjected, monthlyFlowProjection, variableExpensesLast30Days } = calculateFixedProjections;
+
+    return (
+        &lt;div className=&quot;space-y-6&quot;&gt;
+            {/* Proyecciones y Meta */}
+            &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-4&quot;&gt;
+                &lt;div className={`${cardBaseClass} bg-purple-100 shadow-xl`}&gt;
+                    &lt;p className=&quot;text-sm font-medium text-purple-800&quot;&gt;Gasto Variable Estimado (30 días)&lt;/p&gt;
+                    &lt;h3 className=&quot;text-2xl font-extrabold text-purple-900 mt-1&quot;&gt;{formatMXN(variableExpensesLast30Days)}&lt;/h3&gt;
+                &lt;/div&gt;
+                &lt;div className={`${cardBaseClass} bg-purple-200 md:col-span-2 shadow-xl`}&gt;
+                    &lt;p className=&quot;text-sm font-medium text-purple-800&quot;&gt;Proyección de Flujo Mensual (Fijo + Variable)&lt;/p&gt;
+                    &lt;h3 className=&quot;text-3xl font-extrabold text-purple-900 mt-1&quot;&gt;{formatMXN(monthlyFlowProjection)}&lt;/h3&gt;
+                    &lt;p className=&quot;text-xs text-purple-600&quot;&gt;Base: {formatMXN(totalFixedMonthly)} (Fijo) + {formatMXN(variableExpensesLast30Days)} (Variable)&lt;/p&gt;
+                &lt;/div&gt;
+            &lt;/div&gt;
+
+            {/* Formularios de Acción */}
+            &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-6&quot;&gt;
+                &lt;FixedExpenseForm /&gt;
+                &lt;SavingsGoal /&gt;
+                &lt;ApplyFixedButton /&gt;
+            &lt;/div&gt;
+            
+            &lt;h2 className=&quot;text-xl font-bold text-gray-800 mt-6&quot;&gt;Desglose de Gastos Fijos&lt;/h2&gt;
+            &lt;div className={`${cardBaseClass} bg-white overflow-x-auto p-0 shadow-xl`}&gt;
+                &lt;table className=&quot;min-w-full divide-y divide-gray-200&quot;&gt;
+                &lt;thead className=&quot;bg-gray-50&quot;&gt;
+                    &lt;tr&gt;
+                    &lt;th className=&quot;px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Concepto&lt;/th&gt;
+                    &lt;th className=&quot;px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Gasto Mensual&lt;/th&gt;
+                    &lt;th className=&quot;px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;% del Total Fijo&lt;/th&gt;
+                    &lt;th className=&quot;px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Gasto Semanal Proyectado&lt;/th&gt;
+                    &lt;th className=&quot;px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Acción&lt;/th&gt;
+                    &lt;/tr&gt;
+                &lt;/thead&gt;
+                &lt;tbody className=&quot;bg-white divide-y divide-gray-200&quot;&gt;
+                    {fixedData.map(item =&gt; (
+                    &lt;tr key={item.id}&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900&quot;&gt;{item.concept}&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{formatMXN(item.monthlyAmount)}&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{item.percentage}%&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{formatMXN(item.weeklyProjected)}&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-right text-sm font-medium&quot;&gt;
+                        &lt;button
+                            onClick={() =&gt; deleteFixedExpense(item.id)}
+                            className=&quot;text-red-500 hover:text-red-700 p-2 rounded-full hover:bg-red-50&quot;
+                            title=&quot;Eliminar Gasto Fijo&quot;
+                        &gt;
+                            &lt;Trash2 className=&quot;h-4 w-4&quot; /&gt;
+                        &lt;/button&gt;
+                        &lt;/td&gt;
+                    &lt;/tr&gt;
+                    ))}
+                    &lt;tr className=&quot;bg-gray-100 font-bold&quot;&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-base text-gray-900&quot;&gt;SUMATORIA TOTAL&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right&quot;&gt;{formatMXN(totalFixedMonthly)}&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right&quot;&gt;100.00%&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right&quot;&gt;{formatMXN(totalWeeklyProjected)}&lt;/td&gt;
+                        &lt;td className=&quot;px-6 py-4&quot;&gt;&lt;/td&gt;
+                    &lt;/tr&gt;
+                &lt;/tbody&gt;
+                &lt;/table&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+    );
+  };
+  
+  // --- MODAL DE PAGO (NUEVO COMPONENTE) ---
+
+  const PaymentModal = ({ transaction, onClose, onSubmit }) =&gt; {
+    const monthlyPayment = transaction.amount / transaction.msiMonths;
+    const [paymentAmount, setPaymentAmount] = useState(monthlyPayment.toFixed(2));
+    
+    // El máximo a pagar es el saldo pendiente
+    const maxPayment = transaction.pendingBalance;
+
+    const handleModalSubmit = (e) =&gt; {
+        e.preventDefault();
+        const amount = Number(paymentAmount);
+        
+        if (amount &lt;= 0 || amount &gt; maxPayment) {
+            alert(`Error: El monto debe ser mayor a cero y no puede exceder el saldo pendiente (${maxPayment.toFixed(2)}).`);
+            return;
+        }
+        onSubmit(transaction.id, amount);
+        onClose();
+    };
+
+    return (
+        &lt;div className=&quot;fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50 p-4&quot;&gt;
+            &lt;div className=&quot;bg-white rounded-xl shadow-2xl p-6 w-full max-w-md transform transition-all scale-100&quot;&gt;
+                &lt;h3 className=&quot;text-xl font-bold text-pink-700 flex items-center mb-4&quot;&gt;
+                    &lt;DollarSign className=&quot;w-6 h-6 mr-2&quot; /&gt;
+                    Registrar Abono a Deuda
+                &lt;/h3&gt;
+                &lt;p className=&quot;text-sm text-gray-600 mb-2&quot;&gt;Concepto: &lt;span className=&quot;font-semibold&quot;&gt;{transaction.description}&lt;/span&gt;&lt;/p&gt;
+                &lt;p className=&quot;text-sm text-gray-600 mb-4&quot;&gt;Saldo Pendiente: &lt;span className=&quot;font-extrabold text-red-600&quot;&gt;{formatMXN(maxPayment)}&lt;/span&gt;&lt;/p&gt;
+
+                &lt;form onSubmit={handleModalSubmit} className=&quot;space-y-4&quot;&gt;
+                    &lt;div className=&quot;p-3 bg-pink-50 rounded-lg border border-pink-200&quot;&gt;
+                        &lt;p className=&quot;text-xs text-pink-700 font-semibold mb-1&quot;&gt;Pago Mensual Sugerido ({transaction.msiMonths} MSI)&lt;/p&gt;
+                        &lt;p className=&quot;text-lg font-extrabold text-pink-900&quot;&gt;{formatMXN(monthlyPayment)}&lt;/p&gt;
+                    &lt;/div&gt;
+                    
+                    &lt;label className=&quot;block text-sm font-medium text-gray-700&quot;&gt;Monto del Abono&lt;/label&gt;
+                    &lt;input
+                        type=&quot;number&quot;
+                        placeholder=&quot;Cantidad a liquidar/abonar&quot;
+                        value={paymentAmount}
+                        onChange={(e) =&gt; setPaymentAmount(e.target.value)}
+                        className={inputClass}
+                        min=&quot;0.01&quot;
+                        max={maxPayment.toFixed(2)}
+                        step=&quot;0.01&quot;
+                        required
+                    /&gt;
+
+                    &lt;div className=&quot;flex justify-end space-x-3 mt-5&quot;&gt;
+                        &lt;button
+                            type=&quot;button&quot;
+                            onClick={onClose}
+                            className={`${buttonClass} bg-gray-300 text-gray-800 hover:bg-gray-400`}
+                        &gt;
+                            Cancelar
+                        &lt;/button&gt;
+                        &lt;button
+                            type=&quot;submit&quot;
+                            className={`${buttonClass} bg-pink-600 text-white hover:bg-pink-700`}
+                        &gt;
+                            Confirmar Abono
+                        &lt;/button&gt;
+                    &lt;/div&gt;
+                &lt;/form&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+    );
+  };
+
+
+  // --- 3. CARDS &amp; DEBT VIEW (MODIFICADA para ver pendiente y pago) ---
+  const CardsView = () =&gt; {
+    const [selectedCard, setSelectedCard] = useState(null);
+
+    const CardForm = () =&gt; {
+        const [name, setName] = useState(&#x27;&#x27;);
+        const [cutDay, setCutDay] = useState(&#x27;&#x27;);
+        const [paymentDay, setPaymentDay] = useState(&#x27;&#x27;);
+
+        const handleSubmit = (e) =&gt; {
+            e.preventDefault();
+            if (!name || !cutDay || !paymentDay) return;
+            addCard(name, cutDay, paymentDay);
+            setName(&#x27;&#x27;);
+            setCutDay(&#x27;&#x27;);
+            setPaymentDay(&#x27;&#x27;);
+        };
+
+        return (
+            &lt;form onSubmit={handleSubmit} className={`${cardBaseClass} bg-white space-y-4 shadow-xl border-l-4 border-pink-500`}&gt;
+                &lt;h3 className=&quot;text-lg font-bold text-gray-800&quot;&gt;Añadir Tarjeta de Crédito&lt;/h3&gt;
+                &lt;input
+                    type=&quot;text&quot;
+                    placeholder=&quot;Nombre de la Tarjeta&quot;
+                    value={name}
+                    onChange={(e) =&gt; setName(e.target.value)}
+                    className={inputClass}
+                    required
+                /&gt;
+                &lt;div className=&quot;grid grid-cols-2 gap-3&quot;&gt;
+                    &lt;input
+                        type=&quot;number&quot;
+                        placeholder=&quot;Día de Corte&quot;
+                        value={cutDay}
+                        onChange={(e) =&gt; setCutDay(e.target.value)}
+                        className={inputClass}
+                        min=&quot;1&quot;
+                        max=&quot;31&quot;
+                        required
+                    /&gt;
+                    &lt;input
+                        type=&quot;number&quot;
+                        placeholder=&quot;Día de Pago&quot;
+                        value={paymentDay}
+                        onChange={(e) =&gt; setPaymentDay(e.target.value)}
+                        className={inputClass}
+                        min=&quot;1&quot;
+                        max=&quot;31&quot;
+                        required
+                    /&gt;
+                &lt;/div&gt;
+                &lt;button
+                    type=&quot;submit&quot;
+                    className={`${buttonClass} w-full bg-pink-600 text-white hover:bg-pink-700 shadow-md`}
+                &gt;
+                    &lt;Plus className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Registrar Tarjeta
+                &lt;/button&gt;
+            &lt;/form&gt;
+        );
+    };
+
+    const CardListView = ({ setSelectedCard }) =&gt; {
+        const calculateCardMetrics = (cardId) =&gt; {
+            const txns = transactions.filter(t =&gt; t.cardId === cardId);
+            const outstandingDebt = txns.reduce((sum, t) =&gt; sum + t.pendingBalance, 0);
+            return outstandingDebt;
+        };
+
+        return (
+            &lt;div className=&quot;space-y-4&quot;&gt;
+                {cards.length === 0 ? (
+                    &lt;p className=&quot;text-gray-500 text-center py-4 bg-gray-50 rounded-xl&quot;&gt;Aún no hay tarjetas registradas.&lt;/p&gt;
+                ) : (
+                    cards.map(card =&gt; {
+                        const outstandingDebt = calculateCardMetrics(card.id);
+                        return (
+                            &lt;div 
+                                key={card.id} 
+                                className=&quot;bg-pink-50 p-4 rounded-xl shadow-md flex justify-between items-center cursor-pointer hover:bg-pink-100 transition duration-150&quot;
+                                onClick={() =&gt; setSelectedCard(card)}
+                            &gt;
+                                &lt;div&gt;
+                                    &lt;p className=&quot;text-lg font-bold text-pink-800&quot;&gt;{card.name}&lt;/p&gt;
+                                    &lt;p className=&quot;text-sm text-gray-500&quot;&gt;Corte: Día {card.cutDay} | Pago: Día {card.paymentDay}&lt;/p&gt;
+                                &lt;/div&gt;
+                                &lt;div className=&quot;text-right&quot;&gt;
+                                    &lt;p className=&quot;text-sm text-pink-600&quot;&gt;Deuda Pendiente de Pago&lt;/p&gt;
+                                    &lt;p className=&quot;text-2xl font-extrabold text-pink-900&quot;&gt;{formatMXN(outstandingDebt)}&lt;/p&gt;
+                                &lt;/div&gt;
+                            &lt;/div&gt;
+                        )
+                    })
+                )}
+            &lt;/div&gt;
+        );
+    };
+    
+    const CardDetailView = ({ card, onBack, transactions, registerPayment }) =&gt; {
+        const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+        const [selectedTransaction, setSelectedTransaction] = useState(null);
+
+        // Filtrar transacciones asociadas a esta tarjeta
+        const cardTransactions = transactions.filter(t =&gt; t.cardId === card.id).sort((a, b) =&gt; {
+            const dateA = a.timestamp ? a.timestamp.toMillis() : new Date(a.date).getTime();
+            const dateB = b.timestamp ? b.timestamp.toMillis() : new Date(b.date).getTime();
+            return dateB - dateA;
+        });
+        
+        // Calcular la deuda real pendiente (sumando los pendingBalance)
+        const currentOutstandingDebt = cardTransactions.reduce((sum, t) =&gt; sum + t.pendingBalance, 0);
+
+
+        return (
+            &lt;div className=&quot;space-y-6&quot;&gt;
+                 &lt;button onClick={onBack} className={`${buttonClass} bg-gray-200 text-gray-700 hover:bg-gray-300 mb-4 flex items-center`}&gt;
+                     &lt;ArrowLeft className=&quot;w-4 h-4 inline mr-1&quot; /&gt; Volver a Tarjetas
+                 &lt;/button&gt;
+                 
+                 &lt;div className=&quot;bg-pink-600 text-white p-6 rounded-xl shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center&quot;&gt;
+                     &lt;div&gt;
+                         &lt;h2 className=&quot;text-3xl font-extrabold&quot;&gt;{card.name}&lt;/h2&gt;
+                         &lt;p className=&quot;text-sm opacity-90&quot;&gt;Corte: Día {card.cutDay} | Pago: Día {card.paymentDay}&lt;/p&gt;
+                     &lt;/div&gt;
+                     &lt;div className=&quot;text-right mt-4 md:mt-0&quot;&gt;
+                         &lt;p className=&quot;text-sm font-medium&quot;&gt;Deuda Pendiente de Pago&lt;/p&gt;
+                         &lt;p className=&quot;text-3xl font-extrabold&quot;&gt;{formatMXN(currentOutstandingDebt)}&lt;/p&gt;
+                         &lt;p className=&quot;text-xs font-medium text-pink-200&quot;&gt;Deuda Total Original: {formatMXN(card.accumulatedDebt)}&lt;/p&gt;
+                     &lt;/div&gt;
+                 &lt;/div&gt;
+                 
+                 &lt;h3 className=&quot;text-xl font-bold text-gray-800&quot;&gt;Movimientos Asociados (Total Compra)&lt;/h3&gt;
+                 
+                 &lt;div className={`${cardBaseClass} bg-white p-4 max-h-96 overflow-y-auto`}&gt;
+                    {cardTransactions.length === 0 ? (
+                        &lt;p className=&quot;text-gray-500 text-center py-4&quot;&gt;No hay transacciones registradas con esta tarjeta.&lt;/p&gt;
+                    ) : (
+                        &lt;ul className=&quot;divide-y divide-gray-100&quot;&gt;
+                            {cardTransactions.map((t) =&gt; {
+                                const monthlyPayment = t.msiMonths &gt; 1 ? t.amount / t.msiMonths : t.amount;
+                                const displayDate = t.timestamp 
+                                    ? t.timestamp.toDate().toLocaleDateString(&#x27;es-MX&#x27;)
+                                    : new Date(t.date).toLocaleDateString(&#x27;es-MX&#x27;);
+
+                                return (
+                                    &lt;li key={t.id} className=&quot;flex justify-between items-center py-3&quot;&gt;
+                                        &lt;div className=&quot;flex-1 min-w-0 pr-4&quot;&gt;
+                                            &lt;p className={`font-semibold text-red-700`}&gt;
+                                                {t.description}
+                                            &lt;/p&gt;
+                                            &lt;p className=&quot;text-xs text-gray-500&quot;&gt;
+                                                {displayDate}
+                                                {t.msiMonths &gt; 1 &amp;&amp; &lt;span className=&quot;ml-2 font-bold text-pink-600&quot;&gt;{t.msiMonths} MSI&lt;/span&gt;}
+                                                &lt;span className=&quot;ml-2&quot;&gt;| Total Original: {formatMXN(t.amount)}&lt;/span&gt;
+                                            &lt;/p&gt;
+                                        &lt;/div&gt;
+                                        {/* NUEVOS CAMPOS DE BALANCE */}
+                                        &lt;div className=&quot;flex flex-col items-end&quot;&gt;
+                                            &lt;p className=&quot;font-bold text-gray-900&quot;&gt;
+                                                Pendiente: {formatMXN(t.pendingBalance)}
+                                            &lt;/p&gt;
+                                            &lt;p className=&quot;text-xs text-gray-500&quot;&gt;
+                                                Pagado: {formatMXN(t.paidAmount)}
+                                            &lt;/p&gt;
+                                            {t.pendingBalance &gt; 0 &amp;&amp; (
+                                                &lt;button
+                                                    onClick={() =&gt; {
+                                                        setSelectedTransaction(t);
+                                                        setIsPaymentModalOpen(true);
+                                                    }}
+                                                    className=&quot;mt-1 px-3 py-1 text-xs bg-pink-500 text-white rounded-full hover:bg-pink-600 transition&quot;
+                                                    title=&quot;Registrar Pago&quot;
+                                                &gt;
+                                                    Liquidar / Abonar
+                                                &lt;/button&gt;
+                                            )}
+                                        &lt;/div&gt;
+                                        &lt;button
+                                            onClick={() =&gt; deleteTransaction(t.id, t.cardId, t.amount)}
+                                            className=&quot;ml-4 p-2 text-red-500 hover:text-red-700 rounded-full hover:bg-red-50&quot;
+                                            title=&quot;Eliminar Transacción&quot;
+                                        &gt;
+                                            &lt;Trash2 className=&quot;h-4 w-4&quot; /&gt;
+                                        &lt;/button&gt;
+                                    &lt;/li&gt;
+                                )
+                            })}
+                        &lt;/ul &gt;
+                    )}
+                 &lt;/div &gt;
+
+                {/* Instancia del Modal de Pago */}
+                {isPaymentModalOpen &amp;&amp; selectedTransaction &amp;&amp; (
+                    &lt;PaymentModal 
+                        transaction={selectedTransaction}
+                        onClose={() =&gt; {
+                            setIsPaymentModalOpen(false);
+                            setSelectedTransaction(null);
+                        }}
+                        onSubmit={registerPayment}
+                    /&gt;
+                )}
+            &lt;/div &gt;
+        );
+    };
+
+
+    return (
+      &lt;div className=&quot;space-y-6&quot;&gt;
+        &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-6&quot;&gt;
+            &lt;div className=&quot;md:col-span-1&quot;&gt;
+                &lt;CardForm /&gt;
+            &lt;/div&gt;
+            &lt;div className=&quot;md:col-span-2&quot;&gt;
+                &lt;h2 className=&quot;text-xl font-bold text-gray-800 mb-3&quot;&gt;Tarjetas Registradas&lt;/h2&gt;
+                &lt;CardListView setSelectedCard={setSelectedCard} /&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div className=&quot;pt-6 border-t border-gray-200&quot;&gt;
+            {selectedCard ? (
+                // Pasamos las transacciones y la función de pago
+                &lt;CardDetailView 
+                    card={selectedCard} 
+                    onBack={() =&gt; setSelectedCard(null)} 
+                    transactions={transactions} 
+                    registerPayment={registerPayment}
+                /&gt;
+            ) : (
+                &lt;p className=&quot;text-center text-gray-500 p-8 bg-gray-50 rounded-xl&quot;&gt;Selecciona una tarjeta arriba para ver el detalle de movimientos y la deuda acumulada.&lt;/p&gt;
+            )}
+        &lt;/div&gt;
+      &lt;/div&gt;
+    );
+  };
+
+  // --- 4. FUEL VIEW (MODIFICADA CON LLM) ---
+
+  const FuelForm = ({ onSubmit }) =&gt; {
+    const today = new Date().toISOString().split(&#x27;T&#x27;)[0];
+    const [fecha, setFecha] = useState(today);
+    const [gasto, setGasto] = useState(&#x27;&#x27;);
+    const [litros, setLitros] = useState(&#x27;&#x27;);
+    const [kmRecorridos, setKmRecorridos] = useState(&#x27;&#x27;);
+
+    const handleSubmit = (e) =&gt; {
+      e.preventDefault();
+      if (!fecha || !gasto || !litros || !kmRecorridos) return;
+      
+      onSubmit({
+        fecha,
+        gasto,
+        litros,
+        kmRecorridos,
+      });
+
+      setGasto(&#x27;&#x27;);
+      setLitros(&#x27;&#x27;);
+      setKmRecorridos(&#x27;&#x27;);
+    };
+
+    return (
+      &lt;form onSubmit={handleSubmit} className={`${cardBaseClass} bg-white space-y-3 shadow-xl`}&gt;
+        &lt;h3 className=&quot;text-xl font-bold text-gray-800 flex items-center&quot;&gt;
+            &lt;Fuel className=&quot;w-6 h-6 mr-2 text-blue-600&quot; /&gt;
+            Registro de Carga de Combustible
+        &lt;/h3&gt;
+        
+        &lt;label className=&quot;block text-sm font-medium text-gray-700&quot;&gt;Fecha de Carga&lt;/label&gt;
+        &lt;input
+          type=&quot;date&quot;
+          value={fecha}
+          onChange={(e) =&gt; setFecha(e.target.value)}
+          className={inputClass}
+          max={today}
+          required
+        /&gt;
+        &lt;div className=&quot;grid grid-cols-2 gap-3&quot;&gt;
+            &lt;input
+              type=&quot;number&quot;
+              placeholder=&quot;Gasto Total ($)&quot;
+              value={gasto}
+              onChange={(e) =&gt; setGasto(e.target.value)}
+              className={inputClass}
+              min=&quot;0.01&quot;
+              step=&quot;0.01&quot;
+              required
+            /&gt;
+            &lt;input
+              type=&quot;number&quot;
+              placeholder=&quot;Litros Cargados (L)&quot;
+              value={litros}
+              onChange={(e) =&gt; setLitros(e.target.value)}
+              className={inputClass}
+              min=&quot;0.01&quot;
+              step=&quot;0.01&quot;
+              required
+            /&gt;
+        &lt;/div&gt;
+        &lt;input
+          type=&quot;number&quot;
+          placeholder=&quot;Km Recorridos desde la última carga (Km)&quot;
+          value={kmRecorridos}
+          onChange={(e) =&gt; setKmRecorridos(e.target.value)}
+          className={inputClass}
+          min=&quot;1&quot;
+          step=&quot;0.1&quot;
+          required
+        /&gt;
+        &lt;button type=&quot;submit&quot; className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 shadow-md`}&gt;
+          &lt;Plus className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Registrar Carga
+        &lt;/button&gt;
+      &lt;/form&gt;
+    );
+  };
+
+  const FuelTableView = ({ records, onDelete }) =&gt; {
+    
+    const calculateDayDifference = (date1, date2) =&gt; {
+        if (!date1 || !date2) return null;
+        const d1 = new Date(date1);
+        const d2 = new Date(date2);
+        
+        d1.setHours(0, 0, 0, 0);
+        d2.setHours(0, 0, 0, 0);
+
+        const diffTime = Math.abs(d1.getTime() - d2.getTime());
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        return diffDays;
+    };
+    
+    const calculateMetrics = (record, previousRecordDate) =&gt; {
+      const gasto = Number(record.gasto);
+      const litros = Number(record.litros);
+      const kmRecorridos = Number(record.kmRecorridos);
+
+      const rendimiento = kmRecorridos / litros;
+      const costoXlitro = gasto / litros;
+      
+      const daysDiff = previousRecordDate ? calculateDayDifference(record.fecha, previousRecordDate) : null;
+
+      return {
+        rendimiento: rendimiento.toFixed(2),
+        costoXlitro: costoXlitro,
+        daysDiff: daysDiff,
+        rendimientoClass: rendimiento &gt; 12 ? &#x27;text-green-600 font-bold&#x27; : (rendimiento &lt; 8 ? &#x27;text-red-600&#x27; : &#x27;text-orange-600&#x27;), 
+      };
+    };
+
+    return (
+      &lt;div className={`${cardBaseClass} bg-white overflow-x-auto p-0 shadow-xl`}&gt;
+        &lt;table className=&quot;min-w-full divide-y divide-gray-200&quot;&gt;
+          &lt;thead className=&quot;bg-gray-50&quot;&gt;
+            &lt;tr&gt;
+              &lt;th className=&quot;px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Fecha&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Gasto&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Litros&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Km Recorridos&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Rendimiento (Km/L)&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Costo x Litro&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;Rindió&lt;/th&gt;
+              &lt;th className=&quot;px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider&quot;&gt;&lt;/th&gt;
+            &lt;/tr&gt;
+          &lt;/thead&gt;
+          &lt;tbody className=&quot;bg-white divide-y divide-gray-200&quot;&gt;
+            {records.length === 0 ? (
+                &lt;tr&gt;
+                    &lt;td colSpan=&quot;8&quot; className=&quot;px-6 py-4 text-center text-gray-500&quot;&gt;No hay registros de combustible aún.&lt;/td&gt;
+                &lt;/tr&gt;
+            ) : (
+                records.map((record, index) =&gt; {
+                    const previousRecord = records[index + 1];
+                    const previousRecordDate = previousRecord ? previousRecord.fecha : null;
+                    
+                    const metrics = calculateMetrics(record, previousRecordDate);
+                    
+                    const daysText = metrics.daysDiff === null 
+                                       ? &#x27;Inicio&#x27; 
+                                       : `${metrics.daysDiff} días`;
+                                       
+                    const daysClass = metrics.daysDiff &gt; 7 
+                                        ? &#x27;bg-green-100 text-green-800&#x27;
+                                        : (metrics.daysDiff &lt;= 4 ? &#x27;bg-red-100 text-red-800&#x27; : &#x27;bg-yellow-100 text-yellow-800&#x27;);
+
+                    return (
+                        &lt;tr key={record.id}&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm font-medium text-gray-900&quot;&gt;{new Date(record.fecha).toLocaleDateString(&#x27;es-MX&#x27;, { year: &#x27;2-digit&#x27;, month: &#x27;short&#x27;, day: &#x27;numeric&#x27; })}&lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{formatMXN(record.gasto)}&lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{Number(record.litros).toFixed(2)} L&lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{Number(record.kmRecorridos).toFixed(1)} Km&lt;/td&gt;
+                            &lt;td className={`px-3 py-4 whitespace-nowrap text-sm text-center ${metrics.rendimientoClass}`}&gt;{metrics.rendimiento}&lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-right&quot;&gt;{formatMXN(metrics.costoXlitro)}&lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-sm text-center&quot;&gt;
+                                &lt;span className={`inline-flex items-center px-3 py-0.5 rounded-full text-xs font-medium ${daysClass}`}&gt;
+                                    {daysText}
+                                &lt;/span&gt;
+                            &lt;/td&gt;
+                            &lt;td className=&quot;px-3 py-4 whitespace-nowrap text-right text-sm font-medium&quot;&gt;
+                                &lt;button
+                                    onClick={() =&gt; onDelete(record.id)}
+                                    className=&quot;text-red-500 hover:text-red-700 p-2 rounded-full hover:bg-red-50&quot;
+                                    title=&quot;Eliminar Registro&quot;
+                                &gt;
+                                    &lt;Trash2 className=&quot;h-4 w-4&quot; /&gt;
+                                &lt;/button&gt;
+                            &lt;/td&gt;
+                        &lt;/tr&gt;
+                    )
+                })
+            )}
+          &lt;/tbody&gt;
+        &lt;/table&gt;
+      &lt;/div&gt;
+    );
+  };
+
+  const FuelView = () =&gt; {
+    // Cálculo de métricas
+    const { totalLitros, totalGasto, totalKm, promedioRendimiento } = calculateFuelMetrics;
+    const numRecords = fuelRecords.length;
+
+    const metricCards = [
+        { title: &#x27;Cargas Registradas&#x27;, value: numRecords, unit: &#x27; Cargas&#x27;, icon: Clock3, color: &#x27;text-blue-600&#x27;, bg: &#x27;bg-blue-100&#x27; },
+        { title: &#x27;Gasto Total&#x27;, value: formatMXN(totalGasto), unit: &#x27;&#x27;, icon: CircleDollarSign, color: &#x27;text-red-600&#x27;, bg: &#x27;bg-red-100&#x27; },
+        { title: &#x27;Km Totales&#x27;, value: totalKm.toFixed(1), unit: &#x27; Km&#x27;, icon: TrendingUp, color: &#x27;text-green-600&#x27;, bg: &#x27;bg-green-100&#x27; },
+        { title: &#x27;Rendimiento Promedio&#x27;, value: promedioRendimiento.toFixed(2), unit: &#x27; Km/L&#x27;, icon: Fuel, color: &#x27;text-purple-600&#x27;, bg: &#x27;bg-purple-100&#x27; },
+        { title: &#x27;Costo Promedio / Litro&#x27;, value: formatMXN(totalLitros &gt; 0 ? (totalGasto / totalLitros) : 0), unit: &#x27;&#x27;, icon: TrendingDown, color: &#x27;text-orange-600&#x27;, bg: &#x27;bg-orange-100&#x27; },
+    ];
+
+
+    return (
+      &lt;div className=&quot;space-y-6&quot;&gt;
+        &lt;div className=&quot;grid grid-cols-1 md:grid-cols-3 gap-6&quot;&gt;
+            &lt;div className=&quot;md:col-span-1&quot;&gt;
+                &lt;FuelForm onSubmit={addFuelRecord} /&gt;
+            &lt;/div&gt;
+            &lt;div className=&quot;md:col-span-2&quot;&gt;
+                &lt;h3 className=&quot;text-xl font-bold text-gray-800 mb-3&quot;&gt;Métricas Generales&lt;/h3&gt;
+                &lt;div className=&quot;grid grid-cols-2 gap-4&quot;&gt;
+                    {metricCards.map(metric =&gt; (
+                        &lt;div key={metric.title} className={`${cardBaseClass} ${metric.bg} space-y-1 shadow-md`}&gt;
+                            &lt;div className={`flex items-center space-x-2 ${metric.color}`}&gt;
+                                &lt;metric.icon className=&quot;w-5 h-5&quot; /&gt;
+                                &lt;p className=&quot;text-sm font-medium&quot;&gt;{metric.title}&lt;/p&gt;
+                            &lt;/div&gt;
+                            &lt;h4 className=&quot;text-xl font-extrabold text-gray-800&quot;&gt;{metric.value}{metric.unit}&lt;/h4&gt;
+                        &lt;/div&gt;
+                    ))}
+                &lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+        
+        {/* --- SECCIÓN DE ANÁLISIS LLM DE COMBUSTIBLE --- */}
+        &lt;div className={`${cardBaseClass} bg-white space-y-3 p-6 shadow-xl border-t-4 border-blue-500`}&gt;
+            &lt;h2 className=&quot;text-xl font-bold text-gray-800 flex items-center&quot;&gt;
+                &lt;Fuel className=&quot;w-6 h-6 mr-2 text-blue-500&quot; /&gt;
+                Análisis de Eficiencia por IA
+            &lt;/h2&gt;
+            {numRecords &lt; 3 ? (
+                &lt;div className=&#x27;flex items-center p-3 bg-yellow-100 rounded-lg text-yellow-800&#x27;&gt;
+                    &lt;AlertCircle className=&quot;w-5 h-5 mr-2&quot; /&gt;
+                    &lt;p className=&quot;text-sm&quot;&gt;Necesitas al menos 3 registros de carga para generar un análisis significativo.&lt;/p&gt;
+                &lt;/div&gt;
+            ) : (
+                &lt;button
+                    onClick={generateFuelAnalysis}
+                    disabled={isFuelAnalysisLoading}
+                    className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed`}
+                &gt;
+                    {isFuelAnalysisLoading ? (
+                        &lt;div className=&quot;flex items-center justify-center&quot;&gt;
+                            &lt;div className=&quot;animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2&quot;&gt;&lt;/div&gt;
+                            Calculando rendimiento...
+                        &lt;/div&gt;
+                    ) : (
+                        &lt;&gt;
+                            &lt;Sparkles className=&quot;w-5 h-5 inline mr-1&quot; /&gt; Analizar Eficiencia de Combustible
+                        &lt;/&gt;
+                    )}
+                &lt;/button&gt;
+            )}
+            
+            {fuelAnalysis &amp;&amp; (
+                &lt;div className=&quot;mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-gray-700&quot;&gt;
+                    &lt;p className=&quot;font-semibold mb-1 text-blue-600&quot;&gt;Recomendación del Ingeniero IA:&lt;/p&gt;
+                    &lt;div dangerouslySetInnerHTML={{ __html: fuelAnalysis.replace(/\n/g, &#x27;&lt;br /&gt;&#x27;) }} /&gt;
+                &lt;/div&gt;
+            )}
+        &lt;/div&gt;
+        {/* --- FIN SECCIÓN LLM --- */}
+
+        &lt;h2 className=&quot;text-xl font-bold text-gray-800 mt-6&quot;&gt;Historial de Cargas&lt;/h2&gt;
+        &lt;FuelTableView records={fuelRecords} onDelete={deleteFuelRecord} /&gt;
+      &lt;/div&gt;
+    );
+  };
+
+  // --- MAIN RENDER ---
+
+  if (loading) {
+    return (
+      &lt;div className=&quot;flex justify-center items-center h-screen bg-gray-50&quot;&gt;
+        &lt;div className=&quot;p-8 bg-white rounded-xl shadow-2xl text-center&quot;&gt;
+            &lt;div className=&quot;animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-600 mx-auto mb-4&quot;&gt;&lt;/div&gt;
+            &lt;div className=&quot;text-xl font-semibold text-emerald-600&quot;&gt;Cargando aplicación y datos...&lt;/div&gt;
+            {!firebaseInitialized &amp;&amp; &lt;p className=&quot;text-red-500 text-sm mt-2&quot;&gt;Error de Configuración de Firebase. La persistencia puede fallar.&lt;/p&gt;}
+        &lt;/div&gt;
+      &lt;/div&gt;
+    );
+  }
+
+  const renderView = () =&gt; {
+    switch (view) {
+      case &#x27;dashboard&#x27;:
+        return &lt;DashboardView /&gt;;
+      case &#x27;fixed&#x27;:
+        return &lt;FixedExpensesView /&gt;;
+      case &#x27;cards&#x27;:
+        return &lt;CardsView /&gt;;
+      case &#x27;fuel&#x27;:
+        return &lt;FuelView /&gt;;
+      default:
+        return &lt;DashboardView /&gt;;
+    }
+  };
+
+  return (
+    &lt;div className=&quot;min-h-screen bg-gray-50 p-4 md:p-8 font-sans&quot;&gt;
+      &lt;Header title=&quot;Control de Gastos Personal (MXN)&quot; /&gt;
+      &lt;Navigation /&gt;
+      
+      &lt;main className=&quot;container mx-auto&quot;&gt;
+        {renderView()}
+      &lt;/main&gt;
+
+      &lt;footer className=&quot;mt-8 text-center text-xs text-gray-500&quot;&gt;
+        &lt;p&gt;Persistencia garantizada por Firestore. ID de Usuario: {userId}. ID de App: {appId}&lt;/p&gt;
+      &lt;/footer&gt;
+    &lt;/div&gt;
+  );
+};
+
+export default App;</pre>
+    </div>
+  </div>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(console.error));
+    }
+  </script>
+</body>
+</html>
