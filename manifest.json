@@ -1,14 +1,14 @@
 {
   "name": "Control de Gastos",
   "short_name": "Gastos",
-  "id": "/gastos-pwa/",
-  "start_url": "/gastos-pwa/",
-  "scope": "/gastos-pwa/",
+  "id": "/APPGASTOS/",
+  "start_url": "/APPGASTOS/",
+  "scope": "/APPGASTOS/",
   "display": "standalone",
   "theme_color": "#0f172a",
   "background_color": "#0f172a",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
