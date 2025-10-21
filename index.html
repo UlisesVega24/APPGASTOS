@@ -1,9 +1,8 @@
-<!DOCTYPE html>
-<html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Control de Gastos — Versión Standalone</title>
+
   <style>
     :root{
       --bg:#0f172a; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#34d399;
@@ -45,18 +44,23 @@
     footer{margin-top:18px;color:var(--muted);font-size:.85rem;text-align:center}
     .note{font-size:.9rem;color:#9ca3af}
   </style>
+
   <!-- React 18 + ReactDOM + Babel (para abrir directamente en el navegador). Requiere conexión a Internet. -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-  <link rel="manifest" href="/gastos-pwa/manifest.json">
+  <!-- ✅ PWA configuration -->
+  <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#0f172a">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="apple-touch-icon" href="/gastos-pwa/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
 
+  <!-- (opcional) Favicon -->
+  <link rel="icon" href="favicon.ico" type="image/x-icon">
 </head>
+
 <body>
   <div class="container">
     <header>
