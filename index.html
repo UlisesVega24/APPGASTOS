@@ -78,6 +78,13 @@
     .modal-overlay.open .modal-content {
       transform: translateY(0);
     }
+    /* Estilo para el input en la tabla */
+    .table-input {
+      max-width: 120px; /* Ajustar el tamaño del input */
+      padding: 4px;
+      text-align: right;
+      font-size: 0.9rem;
+    }
   </style>
 
   <!-- React 18 + ReactDOM + Babel (para abrir directamente en el navegador). Requiere conexión a Internet. -->
@@ -143,7 +150,8 @@
       const monthKey = (d) => new Date(d).toISOString().slice(0,7); // YYYY-MM
       const isDuplicateTxn = (desc, amount) => {
         const todayKey = monthKey(new Date());
-        const U = String(desc||'').toUpperCase();
+        // ✅ CORRECCIÓN: Usar la descripción original para la comparación, sin convertir a mayúsculas
+        const U = String(desc||'');
         return transactions.some(t => (
           t.type==='expense' &&
           !t.cardId && // Solo verifica transacciones de débito/efectivo
@@ -181,7 +189,8 @@
           id: uid(),
           date: new Date().toISOString(),
           type: data.type, // 'income'|'expense'
-          description: String(data.description || '').toUpperCase(),
+          // ✅ CORRECCIÓN: Quitar .toUpperCase() para guardar el concepto tal cual
+          description: String(data.description || ''),
           amount: Number(data.amount),
           cardId: data.cardId || null, // Guarda el ID de la tarjeta si se usó
           msiMonths: data.cardId ? Number(data.msiMonths || 1) : 1, // Guarda los MSI
@@ -264,7 +273,9 @@
         let added = 0;
         fixedExpenses.forEach(f => { if(addFixedTxn(f)) added++; });
         // Se reemplaza alert() por un mensaje temporal si fuera necesario, pero por ahora se mantiene el alert
-        alert(added>0 ? `Se agregaron ${added} conceptos semanales al Dashboard.` : 'Nada por agregar: todos ya estaban registrados este mes.');
+        if(window.confirm(added>0 ? `Se agregaron ${added} conceptos semanales al Dashboard.` : 'Nada por agregar: todos ya estaban registrados este mes.')){
+          // No hace nada, solo es para confirmar el mensaje
+        }
       };
 
       // Borrar transacción
@@ -272,20 +283,22 @@
 
       // Fijos
       const addFixed = (concept, monthlyAmount) => {
-        const f = { id: uid(), concept: String(concept||'').toUpperCase(), monthlyAmount: Number(monthlyAmount) };
+        // ✅ CORRECCIÓN: Quitar .toUpperCase() para guardar el concepto tal cual
+        const f = { id: uid(), concept: String(concept||''), monthlyAmount: Number(monthlyAmount) };
         setFixedExpenses(prev => [f, ...prev]);
       };
       const delFixed = (id) => setFixedExpenses(prev => prev.filter(x => x.id !== id));
 
       // Tarjetas (Metadata)
       const addCard = (name, cutDay, paymentDay) => {
-        const c = { id: uid(), name: String(name||'').toUpperCase(), cutDay: Number(cutDay), paymentDay: Number(paymentDay) };
+        // ✅ CORRECCIÓN: Quitar .toUpperCase() para guardar el nombre de la tarjeta tal cual
+        const c = { id: uid(), name: String(name||''), cutDay: Number(cutDay), paymentDay: Number(paymentDay) };
         setCards(prev => [c, ...prev]);
       };
       const deleteCard = (id) => {
           if (cardDebts.some(d => d.cardId === id && d.remaining > 0)) {
               // Se reemplaza alert()
-              // alert("No se puede eliminar la tarjeta. Existen deudas pendientes.");
+              if(window.confirm("No se puede eliminar la tarjeta. Existen deudas pendientes.")){}
               console.error("No se puede eliminar la tarjeta. Existen deudas pendientes.");
               return;
           }
@@ -427,6 +440,7 @@
                       if(isAbono) {
                           conceptDisplay = <strong style={{color:'#6b21a8'}}>*ABONO* {t.description.substring(6)}</strong>;
                       } else {
+                          // ✅ CORRECCIÓN: Usar t.description sin modificar, ya que se guarda tal cual
                           conceptDisplay = <strong style={{color:t.type==='income'?'#059669':'#b91c1c'}}>{t.description}</strong>;
                       }
                       
@@ -572,6 +586,7 @@
                 <tbody>
                   {data.fixedData.map(i => (
                     <tr key={i.id}>
+                      {/* ✅ CORRECCIÓN: Usar i.concept tal cual */}
                       <td><strong>{i.concept}</strong></td>
                       <td className="right">{mxn.format(i.monthlyAmount)}</td>
                       <td className="right">{i.percentage}%</td>
@@ -600,15 +615,30 @@
       const [name,setName]=React.useState('');
       const [cut,setCut]=React.useState('');
       const [pay,setPay]=React.useState('');
+      // Estado para la cantidad a abonar que se pone en la tabla, mapeado por debtId
+      const [tempPayments, setTempPayments] = React.useState({});
+      
       const [showPaymentModal, setShowPaymentModal] = React.useState(false);
       const [currentDebt, setCurrentDebt] = React.useState(null);
-      const [paymentAmount, setPaymentAmount] = React.useState('');
+      const [paymentAmount, setPaymentAmount] = React.useState(''); // Usado por el modal
+      
 
       const submit=e=>{ e.preventDefault(); if(!name||!cut||!pay) return; onAdd(name,cut,pay); setName(''); setCut(''); setPay(''); };
 
-      const openPaymentModal = (debt) => {
+      // Actualizar el estado temporal de pago cuando el usuario escribe en el input de la tabla
+      const handleTempPaymentChange = (debtId, value) => {
+        const numValue = Number(value);
+        if (isNaN(numValue) || numValue < 0) return;
+        setTempPayments(prev => ({
+          ...prev,
+          [debtId]: numValue
+        }));
+      };
+
+      const openPaymentModal = (debt, prefilledAmount = 0) => {
         setCurrentDebt(debt);
-        setPaymentAmount(debt.remaining.toFixed(2));
+        // Usar el monto prellenado (el que se tecleó en el input de la tabla)
+        setPaymentAmount(Math.min(prefilledAmount, debt.remaining).toFixed(2));
         setShowPaymentModal(true);
       };
 
@@ -620,6 +650,12 @@
           setShowPaymentModal(false);
           setCurrentDebt(null);
           setPaymentAmount('');
+          // Limpiar el estado temporal después de registrar el pago
+          setTempPayments(prev => {
+              const newPayments = {...prev};
+              delete newPayments[currentDebt.id];
+              return newPayments;
+          });
         }
       };
 
@@ -646,7 +682,7 @@
                 />
                 <div style={{display:'flex', gap:8, marginTop:15}}>
                   <button type="button" className="btn btn--muted" onClick={() => setShowPaymentModal(false)} style={{flexGrow:1}}>Cancelar</button>
-                  <button type="submit" className="btn btn--accent" style={{flexGrow:1}} disabled={Number(paymentAmount) <= 0}>Registrar Abono</button>
+                  <button type="submit" className="btn btn--accent" style={{flexGrow:1}} disabled={Number(paymentAmount) <= 0 || Number(paymentAmount) > currentDebt.remaining}>Registrar Abono</button>
                 </div>
               </form>
             </div>
@@ -701,15 +737,36 @@
             <h3>Movimientos de Tarjeta (Deuda Pendiente)</h3>
             {cardDebts.length===0 ? <p className="note">Sin movimientos de deuda con tarjeta.</p> : (
               <table>
-                <thead><tr><th>Fecha Compra</th><th>Tarjeta</th><th>Concepto</th><th className="right">Monto Original</th><th className="center">MSI</th><th className="right">Saldo Pendiente</th><th className="right">Acciones</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Fecha Compra</th>
+                    <th>Tarjeta</th>
+                    <th>Concepto</th>
+                    <th className="right">Monto Original</th>
+                    <th className="center">MSI</th>
+                    <th className="right">Saldo Pendiente</th>
+                    {/* ✅ NUEVAS COLUMNAS */}
+                    <th className="right">Cant. a Abonar</th>
+                    <th className="right">Faltante</th>
+                    {/* FIN NUEVAS COLUMNAS */}
+                    <th className="right">Acciones</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {cardDebts.map(d => {
                     const cardName = cards.find(c=>c.id===d.cardId)?.name || '—';
                     const isPaid = d.remaining <= 0;
+                    
+                    // Obtener el monto temporal o 0
+                    const tempAmount = tempPayments[d.id] || 0;
+                    // Calcular el faltante
+                    const faltante = isPaid ? 0 : Math.max(0, d.remaining - tempAmount);
+
                     return (
                       <tr key={d.id}>
                         <td>{new Date(d.date).toLocaleDateString('es-MX')}</td>
                         <td>{cardName}</td>
+                        {/* ✅ CORRECCIÓN: Usar d.description tal cual */}
                         <td>{d.description}</td>
                         <td className="right">{mxn.format(d.originalAmount)}</td>
                         <td className="center">{d.msiMonths>1 ? d.msiMonths : '-'}</td>
@@ -717,9 +774,39 @@
                           {mxn.format(d.remaining)}
                           {isPaid && <div style={{fontSize:12, fontWeight:400}}>PAGADA</div>}
                         </td>
+                        
+                        {/* ✅ NUEVA COLUMNA: Cantidad a Abonar (Input) */}
+                        <td className="right">
+                          <input 
+                            type="number"
+                            className="table-input"
+                            value={isPaid ? '' : tempAmount}
+                            onChange={(e) => handleTempPaymentChange(d.id, e.target.value)}
+                            min="0"
+                            // Limitar la cantidad máxima a lo que resta por pagar
+                            max={d.remaining.toFixed(2)}
+                            step="any"
+                            disabled={isPaid}
+                            placeholder="0.00"
+                          />
+                        </td>
+                        
+                        {/* ✅ NUEVA COLUMNA: Faltante */}
+                        <td className="right" style={{color: faltante===0 ? '#059669' : '#b91c1c', fontWeight: 700}}>
+                            {mxn.format(faltante)}
+                        </td>
+
                         <td className="right">
                           <div className="action-group">
-                            <button className="btn btn--accent" disabled={isPaid} onClick={() => openPaymentModal(d)} title="Registrar un abono">Abonar</button>
+                            {/* Botón de Abonar usa el monto tecleado en la tabla como prellenado */}
+                            <button 
+                              className="btn btn--accent" 
+                              disabled={isPaid || tempAmount <= 0 || tempAmount > d.remaining} 
+                              onClick={() => openPaymentModal(d, tempAmount)} 
+                              title="Registrar un abono"
+                            >
+                              Abonar
+                            </button>
                             <button className="btn btn--danger" onClick={() => onDeleteDebt(d.id)} title="Eliminar la compra de la lista de deuda">Eliminar</button>
                           </div>
                         </td>
@@ -837,6 +924,7 @@
             <td className="right">{mxn.format(costo)}</td>
             <td className="center">{dayDiff ?? '—'}</td>
             <td className="right">
+              {/* Se eliminan los caracteres de escape de línea que causaban el error */}
               <button className="btn btn--danger" onClick={() => onDelete(r.id)}>
                 Eliminar
               </button>
