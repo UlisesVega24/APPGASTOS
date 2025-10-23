@@ -1,3 +1,5 @@
+<!DOCTYPE html>
+<html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,7 +11,7 @@
       --white:#ffffff; --shadow:rgba(0,0,0,.25);
     }
     *{box-sizing:border-box}
-    body{margin:0;background:linear-gradient(180deg,var(--bg),#0b1220);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Helvetica Neue,Arial,Noto Sans,sans-serif;line-height:1.55}
+    body{margin:0;background:linear-gradient(180deg,var(--bg),#0b122a);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Helvetica Neue,Arial,Noto Sans,sans-serif;line-height:1.55}
     .container{max-width:1100px;margin:0 auto;padding:24px}
     header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
     h1{font-size:1.25rem;margin:0;color:var(--accent);letter-spacing:.2px}
@@ -20,7 +22,7 @@
     .btn--danger{background:#ef4444;color:#fff}
     .btn--primary{background:#3b82f6;color:#fff}
     .btn--yellow{background:#f59e0b;color:#fff}
-    .btn--ghost{background: #EF4444;color:#111827}
+    .btn--ghost{background:#EF4444;color:#111827}
     .btn:disabled{opacity:.6;cursor:not-allowed}
     .panel{background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:16px;box-shadow:0 10px 25px rgba(0,0,0,.35);overflow:auto}
     .grid{display:grid;gap:16px}
@@ -82,6 +84,7 @@
     // Helpers
     const mxn = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', minimumFractionDigits: 2 });
     const uid = () => Math.random().toString(36).slice(2);
+    const sum = arr => (arr || []).reduce((a, b) => a + Number(b || 0), 0); // <-- NUEVO
 
     // Persistencia simple
     const useLocalState = (key, initial) => {
@@ -123,7 +126,11 @@
           description: String(data.description || '').toUpperCase(),
           amount: Number(data.amount),
           cardId: data.cardId || null,
-          msiMonths: data.cardId ? Number(data.msiMonths || 1) : 1
+          msiMonths: data.cardId ? Number(data.msiMonths || 1) : 1,
+
+          // ✅ NUEVO: para ahorro/abonos de compras con tarjeta
+          pagos: [],
+          ahorro: 0
         };
         setTransactions(prev => [t, ...prev]);
         // Opción: añadir a fijo si el usuario marcó
@@ -150,6 +157,11 @@
 
       // Borrar transacción
       const delTxn = (id) => setTransactions(prev => prev.filter(x => x.id !== id));
+
+      // Actualizar una transacción (para abonos/ahorro)  ✅ NUEVO
+      const updateTxn = (id, updater) => {
+        setTransactions(prev => prev.map(t => t.id === id ? updater(t) : t));
+      };
 
       // Fijos
       const addFixed = (concept, monthlyAmount) => {
@@ -196,10 +208,10 @@
         return { fixedData, totalFixedMonthly, totalWeeklyProjected: totalFixedMonthly/4, monthlyFlowProjection, variableLast30 };
       }, [fixedExpenses, transactions]);
 
+      // ✅ Deuda por tarjeta ahora considera abonos realizados (Total − Pagado)
       const cardDebt = (cardId) => {
         const tx = transactions.filter(t => t.cardId===cardId);
-        const total = tx.reduce((s,t)=> s + t.amount, 0);
-        return total;
+        return tx.reduce((s,t) => s + Math.max(0, Number(t.amount) - sum(t.pagos)), 0);
       };
 
       const fuelMetrics = useMemo(() => {
@@ -223,7 +235,12 @@
             settings={settings} onSaveSettings={(s)=>setSettings(s)}
             onPushAll={addAllFixedTxns} onPushOne={addFixedTxn}
           />}
-          {view==='cards' && <CardsView cards={cards} onAdd={addCard} transactions={transactions} cardDebt={cardDebt} />}
+          {view==='cards' && <CardsView
+            cards={cards} onAdd={addCard}
+            transactions={transactions}
+            cardDebt={cardDebt}
+            onUpdate={updateTxn}   {/* <-- NUEVO */}
+          />}
           {view==='fuel' && <FuelView records={fuel} metrics={fuelMetrics} onAdd={addFuel} onDelete={delFuel} />}
         </>
       );
@@ -348,6 +365,117 @@
       );
     }
 
+    /* =======================
+       TARJETAS (ACTUALIZADA)
+       ======================= */
+    function CardsView({cards,onAdd,transactions,cardDebt,onUpdate}){
+      const [name,setName]=React.useState('');
+      const [cut,setCut]=React.useState('');
+      const [pay,setPay]=React.useState('');
+
+      const submit=e=>{ e.preventDefault(); if(!name||!cut||!pay) return; onAdd(name,cut,pay); setName(''); setCut(''); setPay(''); };
+
+      // Acciones nuevas
+      const onSetAhorro = (mov) => {
+        const actual = Number(mov.ahorro||0);
+        const val = prompt('¿Cuánto llevas juntado para esta compra?', actual);
+        if (val === null) return;
+        const monto = Number(val);
+        if (!isNaN(monto) && monto >= 0) {
+          onUpdate(mov.id, m => ({ ...m, ahorro: monto }));
+        }
+      };
+
+      const onAbonar = (mov) => {
+        const sugerido = mov.msiMonths && mov.msiMonths>1 ? (mov.amount/mov.msiMonths).toFixed(2) : '';
+        const val = prompt('Monto a abonar', sugerido);
+        if (val === null) return;
+        const monto = Number(val);
+        if (!isNaN(monto) && monto > 0) {
+          onUpdate(mov.id, m => ({ ...m, pagos: [ ...(m.pagos||[]), monto ] }));
+        }
+      };
+
+      const cardMovs = transactions.filter(t=>t.cardId);
+
+      return (
+        <div className="grid" style={{marginTop:16}}>
+          <div className="grid" style={{gridTemplateColumns:'1fr 2fr',gap:16}}>
+            <div className="card">
+              <h3>Añadir Tarjeta</h3>
+              <form onSubmit={submit}>
+                <label>Nombre</label><input value={name} onChange={e=>setName(e.target.value)} required />
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8}}>
+                  <div><label>Día de corte</label><input type="number" value={cut} min="1" max="31" onChange={e=>setCut(e.target.value)} required /></div>
+                  <div><label>Día de pago</label><input type="number" value={pay} min="1" max="31" onChange={e=>setPay(e.target.value)} required /></div>
+                </div>
+                <button className="btn btn--yellow" type="submit" style={{marginTop:12,width:'100%'}}>Registrar</button>
+              </form>
+            </div>
+            <div className="card">
+              <h3>Tarjetas Registradas</h3>
+              {cards.length===0 ? <p className="note">Aún no hay tarjetas.</p> : (
+                <table>
+                  <thead><tr><th>Tarjeta</th><th>Corte</th><th>Pago</th><th className="right">Deuda (restante)</th></tr></thead>
+                  <tbody>
+                    {cards.map(c => (
+                      <tr key={c.id}>
+                        <td><strong>{c.name}</strong></td>
+                        <td>{c.cutDay}</td>
+                        <td>{c.paymentDay}</td>
+                        <td className="right">{mxn.format(cardDebt(c.id))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <p className="note" style={{marginTop:8}}>La deuda ahora descuenta abonos realizados (Total − Pagado).</p>
+            </div>
+          </div>
+          <div className="card">
+            <h3>Movimientos con Tarjeta</h3>
+            {cardMovs.length===0 ? <p className="note">Sin movimientos con tarjeta.</p> : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha</th><th>Tarjeta</th><th>Concepto</th>
+                    <th className="right">Total</th><th className="center">MSI</th>
+                    <th className="right">Pagado</th><th className="right">Resta</th>
+                    <th className="right">Ahorro</th>
+                    <th className="center">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cardMovs.map(t => {
+                    const cardName = cards.find(c=>c.id===t.cardId)?.name || '—';
+                    const pagado = sum(t.pagos);
+                    const resta  = Math.max(0, Number(t.amount) - pagado);
+                    const ahorro = Number(t.ahorro || 0);
+                    return (
+                      <tr key={t.id}>
+                        <td>{new Date(t.date).toLocaleDateString('es-MX')}</td>
+                        <td>{cardName}</td>
+                        <td>{t.description}</td>
+                        <td className="right">{mxn.format(t.amount)}</td>
+                        <td className="center">{t.msiMonths>1 ? t.msiMonths : '-'}</td>
+                        <td className="right">{mxn.format(pagado)}</td>
+                        <td className="right">{mxn.format(resta)}</td>
+                        <td className="right">{mxn.format(ahorro)}</td>
+                        <td className="center" style={{whiteSpace:'nowrap'}}>
+                          <button className="btn btn--primary" onClick={()=>onAbonar(t)}>Abonar</button>
+                          <button className="btn btn--yellow"  onClick={()=>onSetAhorro(t)} style={{marginLeft:8}}>Ahorro</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     function FixedView({data,onAdd,onDelete,settings,onSaveSettings,onPushAll,onPushOne}){
       const [concept,setConcept]=React.useState('');
       const [amount,setAmount]=React.useState('');
@@ -431,73 +559,6 @@
       );
     }
 
-    function CardsView({cards,onAdd,transactions,cardDebt}){
-      const [name,setName]=React.useState('');
-      const [cut,setCut]=React.useState('');
-      const [pay,setPay]=React.useState('');
-
-      const submit=e=>{ e.preventDefault(); if(!name||!cut||!pay) return; onAdd(name,cut,pay); setName(''); setCut(''); setPay(''); };
-
-      return (
-        <div className="grid" style={{marginTop:16}}>
-          <div className="grid" style={{gridTemplateColumns:'1fr 2fr',gap:16}}>
-            <div className="card">
-              <h3>Añadir Tarjeta</h3>
-              <form onSubmit={submit}>
-                <label>Nombre</label><input value={name} onChange={e=>setName(e.target.value)} required />
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8}}>
-                  <div><label>Día de corte</label><input type="number" value={cut} min="1" max="31" onChange={e=>setCut(e.target.value)} required /></div>
-                  <div><label>Día de pago</label><input type="number" value={pay} min="1" max="31" onChange={e=>setPay(e.target.value)} required /></div>
-                </div>
-                <button className="btn btn--yellow" type="submit" style={{marginTop:12,width:'100%'}}>Registrar</button>
-              </form>
-            </div>
-            <div className="card">
-              <h3>Tarjetas Registradas</h3>
-              {cards.length===0 ? <p className="note">Aún no hay tarjetas.</p> : (
-                <table>
-                  <thead><tr><th>Tarjeta</th><th>Corte</th><th>Pago</th><th className="right">Deuda (total compras)</th></tr></thead>
-                  <tbody>
-                    {cards.map(c => (
-                      <tr key={c.id}>
-                        <td><strong>{c.name}</strong></td>
-                        <td>{c.cutDay}</td>
-                        <td>{c.paymentDay}</td>
-                        <td className="right">{mxn.format(cardDebt(c.id))}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              <p className="note" style={{marginTop:8}}>La deuda mostrada es la suma de los montos originales de las compras ligadas a la tarjeta (simplificado).</p>
-            </div>
-          </div>
-          <div className="card">
-            <h3>Movimientos con Tarjeta</h3>
-            {transactions.filter(t=>t.cardId).length===0 ? <p className="note">Sin movimientos con tarjeta.</p> : (
-              <table>
-                <thead><tr><th>Fecha</th><th>Tarjeta</th><th>Concepto</th><th className="right">Total</th><th className="center">MSI</th></tr></thead>
-                <tbody>
-                  {transactions.filter(t=>t.cardId).map(t => {
-                    const cardName = cards.find(c=>c.id===t.cardId)?.name || '—';
-                    return (
-                      <tr key={t.id}>
-                        <td>{new Date(t.date).toLocaleDateString('es-MX')}</td>
-                        <td>{cardName}</td>
-                        <td>{t.description}</td>
-                        <td className="right">{mxn.format(t.amount)}</td>
-                        <td className="center">{t.msiMonths>1 ? t.msiMonths : '-'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      );
-    }
-
     function FuelView({records,metrics,onAdd,onDelete}){
       const today = new Date().toISOString().split('T')[0];
       const [fecha,setFecha]=React.useState(today);
@@ -551,60 +612,57 @@
 
           <div className="card">
             <h3>Historial de Cargas</h3>
-{records.length === 0 ? (
-  <p className="note">Sin registros.</p>
-) : (
-  <table>
-    <thead>
-      <tr>
-        <th>Fecha</th>
-        <th className="right">Gasto</th>
-        <th className="right">Litros</th>
-        <th className="right">Km</th>
-        <th className="center">Km/L</th>
-        <th className="right">$/L</th>
-        <th className="center">D / RINDIO</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {records.map((r, i) => {
-        const prev = records[i + 1];
-        const { rendimiento, costo, dayDiff } = calcRow(r, prev?.fecha);
+            {records.length === 0 ? (
+              <p className="note">Sin registros.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th className="right">Gasto</th>
+                    <th className="right">Litros</th>
+                    <th className="right">Km</th>
+                    <th className="center">Km/L</th>
+                    <th className="right">$/L</th>
+                    <th className="center">D / RINDIO</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {records.map((r, i) => {
+                    const prev = records[i + 1];
+                    const { rendimiento, costo, dayDiff } = calcRow(r, prev?.fecha);
 
-        // ✅ Función para mostrar fecha sin zona horaria
-        const fmtFecha = (str) => {
-          const [y, m, d] = str.split('-').map(Number);
-          const meses = [
-            'ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'
-          ];
-          return `${String(d).padStart(2, '0')} ${meses[m - 1]} ${String(y).slice(-2)}`;
-        };
+                    const fmtFecha = (str) => {
+                      const [y, m, d] = str.split('-').map(Number);
+                      const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+                      return `${String(d).padStart(2, '0')} ${meses[m - 1]} ${String(y).slice(-2)}`;
+                    };
 
-        return (
-          <tr key={r.id}>
-            <td>{fmtFecha(r.fecha)}</td>
-            <td className="right">{mxn.format(r.gasto)}</td>
-            <td className="right">{r.litros.toFixed(2)} L</td>
-            <td className="right">{r.kmRecorridos.toFixed(1)} Km</td>
-            <td className="center">{rendimiento}</td>
-            <td className="right">{mxn.format(costo)}</td>
-            <td className="center">{dayDiff ?? '—'}</td>
-            <td className="right">
-              <button className="btn btn--danger" onClick={() => onDelete(r.id)}>
-                Eliminar
-              </button>
-            </td>
-          </tr>
-        );
-      })}
-    </tbody>
-  </table>
-)}
-</div>
-</div>
-);
-}
+                    return (
+                      <tr key={r.id}>
+                        <td>{fmtFecha(r.fecha)}</td>
+                        <td className="right">{mxn.format(r.gasto)}</td>
+                        <td className="right">{r.litros.toFixed(2)} L</td>
+                        <td className="right">{r.kmRecorridos.toFixed(1)} Km</td>
+                        <td className="center">{rendimiento}</td>
+                        <td className="right">{mxn.format(costo)}</td>
+                        <td className="center">{dayDiff ?? '—'}</td>
+                        <td className="right">
+                          <button className="btn btn--danger" onClick={() => onDelete(r.id)}>
+                            Eliminar
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      );
+    }
 
     // Render
     const root = ReactDOM.createRoot(document.getElementById('app'));
@@ -613,13 +671,13 @@
 
   <script>
     if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker
-        .register('sw.js')
-        .then(() => console.log('SW registrado correctamente'))
-        .catch(err => console.log('Error al registrar SW', err));
-    });
-  }
+      window.addEventListener('load', () => {
+        navigator.serviceWorker
+          .register('sw.js')
+          .then(() => console.log('SW registrado correctamente'))
+          .catch(err => console.log('Error al registrar SW', err));
+      });
+    }
   </script>
 
 </body>
