@@ -551,33 +551,60 @@
 
           <div className="card">
             <h3>Historial de Cargas</h3>
-            {records.length===0 ? <p className="note">Sin registros.</p> : (
-              <table>
-                <thead><tr><th>Fecha</th><th className="right">Gasto</th><th className="right">Litros</th><th className="right">Km</th><th className="center">Km/L</th><th className="right">$/L</th><th className="center">D / RINDIO</th><th></th></tr></thead>
-                <tbody>
-                  {records.map((r,i) => {
-                    const prev = records[i+1];
-                    const { rendimiento, costo, dayDiff } = calcRow(r, prev?.fecha);
-                    return (
-                      <tr key={r.id}>
-                        <td>{new Date(r.fecha).toLocaleDateString('es-MX',{year:'2-digit',month:'short',day:'numeric'})}</td>
-                        <td className="right">{mxn.format(r.gasto)}</td>
-                        <td className="right">{r.litros.toFixed(2)} L</td>
-                        <td className="right">{r.kmRecorridos.toFixed(1)} Km</td>
-                        <td className="center">{rendimiento}</td>
-                        <td className="right">{mxn.format(costo)}</td>
-                        <td className="center">{dayDiff ?? '—'}</td>
-                        <td className="right"><button className="btn btn--danger" onClick={()=>onDelete(r.id)}>Eliminar</button></td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      );
-    }
+{records.length === 0 ? (
+  <p className="note">Sin registros.</p>
+) : (
+  <table>
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th className="right">Gasto</th>
+        <th className="right">Litros</th>
+        <th className="right">Km</th>
+        <th className="center">Km/L</th>
+        <th className="right">$/L</th>
+        <th className="center">D / RINDIO</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {records.map((r, i) => {
+        const prev = records[i + 1];
+        const { rendimiento, costo, dayDiff } = calcRow(r, prev?.fecha);
+
+        // ✅ Función para mostrar fecha sin zona horaria
+        const fmtFecha = (str) => {
+          const [y, m, d] = str.split('-').map(Number);
+          const meses = [
+            'ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'
+          ];
+          return `${String(d).padStart(2, '0')} ${meses[m - 1]} ${String(y).slice(-2)}`;
+        };
+
+        return (
+          <tr key={r.id}>
+            <td>{fmtFecha(r.fecha)}</td>
+            <td className="right">{mxn.format(r.gasto)}</td>
+            <td className="right">{r.litros.toFixed(2)} L</td>
+            <td className="right">{r.kmRecorridos.toFixed(1)} Km</td>
+            <td className="center">{rendimiento}</td>
+            <td className="right">{mxn.format(costo)}</td>
+            <td className="center">{dayDiff ?? '—'}</td>
+            <td className="right">
+              <button className="btn btn--danger" onClick={() => onDelete(r.id)}>
+                Eliminar
+              </button>
+            </td>
+          </tr>
+        );
+      })}
+    </tbody>
+  </table>
+)}
+</div>
+</div>
+);
+}
 
     // Render
     const root = ReactDOM.createRoot(document.getElementById('app'));
