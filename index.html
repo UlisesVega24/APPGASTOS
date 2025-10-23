@@ -195,19 +195,21 @@
           cardId: data.cardId || null, // Guarda el ID de la tarjeta si se usó
           msiMonths: data.cardId ? Number(data.msiMonths || 1) : 1, // Guarda los MSI
           // ✅ NUEVA PROPIEDAD: Indica si la transacción fue generada desde la sección de Fijos
-          isFixedSource: data.isFixedSource || false
+          isFixedSource: data.isFixedSource || false,
+          // Propiedad para identificar si es un abono, para EXCLUIRLO de los cálculos de GASTOS totales.
+          isPayment: data.isPayment || false 
         };
 
         // 1. Registrar al flujo de caja (Dashboard)
         setTransactions(prev => [t, ...prev]);
 
         // 2. Si es un GASTO con Tarjeta, registrar la deuda.
-        if (t.type === 'expense' && t.cardId) {
+        if (t.type === 'expense' && t.cardId && !t.isPayment) {
             addCardDebt(t); 
         }
 
         // Opción: añadir a fijo si el usuario marcó (aplica a todos los gastos, ya sea efectivo o tarjeta)
-        if(data.isFixedExpense && t.type==='expense'){
+        if(data.isFixedExpense && t.type==='expense' && !t.isPayment){
           // Si es MSI, el monto fijo es la mensualidad. Si es sin MSI o efectivo, es el monto total.
           const monthlyAmount = t.msiMonths > 1 ? t.amount / t.msiMonths : t.amount;
           addFixed(t.description, monthlyAmount);
@@ -217,7 +219,19 @@
       // Funciones de Tarjetas de Crédito / Deudas 
       // La función addCardDebt fue reubicada/implementada arriba.
       
-      const delCardDebt = (id) => { setCardDebts(prev => prev.filter(x => x.id !== id)); };
+      const delCardDebt = (id) => { setCardDebts(prevDebts => {
+        const debtToDelete = prevDebts.find(d => d.id === id);
+        if (debtToDelete) {
+          // Si se elimina una deuda, también debemos eliminar la transacción original de gasto del Dashboard.
+          setTransactions(prevTxns => prevTxns.filter(t => 
+            // Elimina la transacción original de compra (no abono)
+            !(t.cardId === debtToDelete.cardId && t.description === debtToDelete.description && t.amount === debtToDelete.originalAmount && !t.isPayment) &&
+            // Elimina cualquier abono relacionado (aunque los abonos ya no afectan el total, es buena práctica)
+            !(t.isPayment && String(t.description).includes(debtToDelete.description))
+          ));
+        }
+        return prevDebts.filter(x => x.id !== id);
+      }); };
       
       const makeCardPayment = (id, amount) => { 
         setCardDebts(prevDebts => prevDebts.map(debt => {
@@ -237,9 +251,11 @@
               amount: paymentAmount,
               cardId: null, 
               msiMonths: 1,
-              isFixedSource: false // Los abonos no son gastos fijos
+              isFixedSource: false,
+              isPayment: true // ✅ CAMBIO CRÍTICO: Marca como abono para ser ignorado en cálculos
             };
-            setTransactions(prev => [paymentTxn, ...prev]);
+            // Usamos addTxn para registrar el abono.
+            addTxn(paymentTxn); // addTxn ahora maneja la lógica de guardado y marcado
 
             return {
               ...debt,
@@ -265,7 +281,8 @@
           cardId: null, 
           msiMonths: 1, 
           isFixedExpense: false,
-          isFixedSource: true
+          isFixedSource: true,
+          isPayment: false
         });
         return true;
       };
@@ -316,15 +333,24 @@
       // Cálculos
       const { income, expenses, balance } = useMemo(() => {
         let inc=0, exp=0;
-        // Contar todos los gastos (flujo de caja):
-        // Para GASTOS con MSI, solo sumamos la mensualidad (amount / msiMonths) al flujo.
-        // Para INGRESOS y otros GASTOS (sin MSI o efectivo/débito), sumamos el amount completo.
+        
         transactions.forEach(t => {
+          // 1. Ingresos siempre se suman
           if(t.type==='income') {
             inc += t.amount;
+            return;
           }
+          
+          // 2. Si es un Gasto...
           if(t.type==='expense') {
-            // ✅ CORRECCIÓN CRÍTICA: Si es MSI, sumar solo la mensualidad. Si no, sumar el monto completo.
+            // ✅ CAMBIO CRÍTICO: IGNORAR ABONOS (isPayment: true) en la suma total de gastos
+            if (t.isPayment) {
+                // El abono solo se registra, no afecta el total de gastos/balance.
+                return;
+            }
+
+            // Para GASTOS no-abono:
+            // Si es MSI, sumar solo la mensualidad. Si no, sumar el monto completo.
             const flowAmount = t.msiMonths > 1 ? (t.amount / t.msiMonths) : t.amount;
             exp += flowAmount;
           } 
@@ -339,10 +365,11 @@
           return { ...i, percentage: pct.toFixed(2), weeklyProjected: i.monthlyAmount/4 };
         });
         const thirtyDaysAgo = new Date(Date.now()-30*24*60*60*1000);
-        // Ahora el cálculo de variable usa TODAS las transacciones de gasto
+        // Ahora el cálculo de variable usa TODAS las transacciones de gasto (EXCEPTO abonos)
         const variableLast30 = transactions
-          .filter(t => t.type==='expense' && new Date(t.date)>=thirtyDaysAgo)
-          // ⚠️ IMPORTANTE: Aquí también aplicamos la corrección para sumar solo la mensualidad si es MSI
+          // Filtra: solo gastos, no abonos, en los últimos 30 días
+          .filter(t => t.type==='expense' && !t.isPayment && new Date(t.date)>=thirtyDaysAgo)
+          // Sumar solo la mensualidad si es MSI
           .reduce((s,t)=> s + (t.msiMonths > 1 ? (t.amount / t.msiMonths) : t.amount), 0);
         const monthlyFlowProjection = totalFixedMonthly + variableLast30;
         return { fixedData, totalFixedMonthly, totalWeeklyProjected: totalFixedMonthly/4, monthlyFlowProjection, variableLast30 };
@@ -433,14 +460,16 @@
                       // El monto en el historial siempre debe ser la mensualidad para reflejar el flujo de caja
                       const monthly = t.msiMonths>1 ? t.amount/t.msiMonths : t.amount;
                       const cardName = cards.find(c=>c.id===t.cardId)?.name;
-                      const isAbono = String(t.description).startsWith('ABONO:'); // Marcar abonos de deudas antiguas
-                      const isFixedSource = t.isFixedSource; // Bandera para Gasto Fijo
+                      // Usa la nueva propiedad isPayment
+                      const isAbono = t.isPayment; 
+                      const isFixedSource = t.isFixedSource; 
 
                       let conceptDisplay;
                       if(isAbono) {
+                          // ✅ Muestra el concepto de abono con estilo
                           conceptDisplay = <strong style={{color:'#6b21a8'}}>*ABONO* {t.description.substring(6)}</strong>;
                       } else {
-                          // ✅ CORRECCIÓN: Usar t.description sin modificar, ya que se guarda tal cual
+                          // ✅ Usa t.description tal cual
                           conceptDisplay = <strong style={{color:t.type==='income'?'#059669':'#b91c1c'}}>{t.description}</strong>;
                       }
                       
@@ -449,7 +478,7 @@
                           <td>{new Date(t.date).toLocaleDateString('es-MX')}</td>
                           <td>
                             {conceptDisplay}
-                            {isFixedSource && <span style={{marginLeft:6,color:'#0891b2',fontWeight:700}}>(Fijo)</span>} {/* INDICADOR DE GASTO FIJO */}
+                            {isFixedSource && <span style={{marginLeft:6,color:'#0891b2',fontWeight:700}}>(Fijo)</span>}
                             {cardName && <span style={{marginLeft:6,color:'#1e40af',fontWeight:700}}>({cardName})</span>}
                             {!t.cardId && t.type==='expense' && !isAbono && !isFixedSource && <span style={{marginLeft:6,color:'#6b7280',fontWeight:500}}>(Efectivo/Débito)</span>}
                           </td>
@@ -481,7 +510,7 @@
       const submit=e=>{
         e.preventDefault();
         if(!description || !amount || Number(amount)<=0) return;
-        // isFixedSource es false por defecto para transacciones manuales
+        // isFixedSource y isPayment son false por defecto para transacciones manuales
         onSubmit({
           type,
           description,
@@ -489,7 +518,8 @@
           cardId:cardId||null,
           msiMonths:cardId?Number(msiMonths):1,
           isFixedExpense:isFixed && type==='expense',
-          isFixedSource: false // Transacción manual, no viene de la lista de Fijos
+          isFixedSource: false,
+          isPayment: false // ✅ Transacción manual, no es un abono
         });
         setDescription(''); setAmount(''); setCardId(''); setMsiMonths(1); setIsFixed(false);
       };
@@ -505,11 +535,8 @@
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8}}>
             <div>
               <label>Monto (MXN)</label>
-              {/* Monto Total de la compra, incluso si es MSI */}
-              {/* Se cambia step="0.01" a step="any" para permitir números enteros sin conflicto */}
               <input type="number" value={amount} min="0.01" step="any" onChange={e=>setAmount(e.target.value)} required />
             </div>
-            {/* SE MANTIENE EL SELECTOR DE TARJETA, AUNQUE AHORA ES SOLO UN REGISTRO DE PAGO */}
             <div>
               <label>Método de Pago (Opcional)</label>
               <select value={cardId} onChange={e=>{ setCardId(e.target.value); if(!e.target.value) setMsiMonths(1); }}>
@@ -563,8 +590,6 @@
                 <label>Concepto</label>
                 <input value={concept} onChange={e=>setConcept(e.target.value)} placeholder="RENTA, NETFLIX" required />
                 <label style={{marginTop:8}}>Monto mensual</label>
-                {/* Monto mensual del gasto fijo */}
-                {/* Se cambia step="0.01" a step="any" para permitir números enteros sin conflicto */}
                 <input type="number" value={amount} min="0.01" step="any" onChange={e=>setAmount(e.target.value)} required />
                 <button className="btn btn--primary" type="submit" style={{marginTop:12,width:'100%'}}>Añadir</button>
               </form>
@@ -586,7 +611,6 @@
                 <tbody>
                   {data.fixedData.map(i => (
                     <tr key={i.id}>
-                      {/* ✅ CORRECCIÓN: Usar i.concept tal cual */}
                       <td><strong>{i.concept}</strong></td>
                       <td className="right">{mxn.format(i.monthlyAmount)}</td>
                       <td className="right">{i.percentage}%</td>
@@ -617,6 +641,8 @@
       const [pay,setPay]=React.useState('');
       // Estado para la cantidad a abonar que se pone en la tabla, mapeado por debtId
       const [tempPayments, setTempPayments] = React.useState({});
+      // ✅ NUEVO ESTADO PARA EL FILTRO DE TARJETA
+      const [selectedCardId, setSelectedCardId] = React.useState(''); // ID de la tarjeta para filtrar
       
       const [showPaymentModal, setShowPaymentModal] = React.useState(false);
       const [currentDebt, setCurrentDebt] = React.useState(null);
@@ -658,6 +684,15 @@
           });
         }
       };
+
+      // ✅ DATOS FILTRADOS
+      const filteredDebts = useMemo(() => {
+          if (!selectedCardId) {
+              return cardDebts;
+          }
+          return cardDebts.filter(d => d.cardId === selectedCardId);
+      }, [cardDebts, selectedCardId]);
+
 
       const PaymentModal = () => {
         if (!showPaymentModal || !currentDebt) return null;
@@ -734,8 +769,21 @@
             </div>
           </div>
           <div className="card">
-            <h3>Movimientos de Tarjeta (Deuda Pendiente)</h3>
-            {cardDebts.length===0 ? <p className="note">Sin movimientos de deuda con tarjeta.</p> : (
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12}}>
+              <h3>Movimientos de Tarjeta (Deuda Pendiente)</h3>
+              {/* ✅ NUEVO FILTRO */}
+              <div style={{width:'300px'}}>
+                <label>Filtrar por Tarjeta</label>
+                <select value={selectedCardId} onChange={e => setSelectedCardId(e.target.value)}>
+                  <option value="">TODAS las tarjetas</option>
+                  {cards.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              {/* FIN NUEVO FILTRO */}
+            </div>
+            
+            {/* Usar los datos filtrados: filteredDebts */}
+            {filteredDebts.length===0 ? <p className="note">Sin movimientos de deuda con tarjeta{(selectedCardId && cardDebts.length > 0) ? ` para la tarjeta seleccionada.` : '.'}</p> : (
               <table>
                 <thead>
                   <tr>
@@ -753,7 +801,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {cardDebts.map(d => {
+                  {filteredDebts.map(d => {
                     const cardName = cards.find(c=>c.id===d.cardId)?.name || '—';
                     const isPaid = d.remaining <= 0;
                     
@@ -924,7 +972,6 @@
             <td className="right">{mxn.format(costo)}</td>
             <td className="center">{dayDiff ?? '—'}</td>
             <td className="right">
-              {/* Se eliminan los caracteres de escape de línea que causaban el error */}
               <button className="btn btn--danger" onClick={() => onDelete(r.id)}>
                 Eliminar
               </button>
